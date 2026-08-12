@@ -4,11 +4,43 @@ on:
   push:
     branches: [master]
   pull_request:
+    branches: [master]
 
 jobs:
-  verify:
+  build:
+    name: Lint, build & unit tests
     runs-on: ubuntu-latest
 
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Lint
+        run: npm run lint:ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test
+
+  e2e:
+    name: E2E tests
+    runs-on: ubuntu-latest
+
+    # Mirrors the postgres-test service in docker-compose.yml: a throwaway
+    # database on 5433, kept off 5432 so nothing can mistake it for a
+    # development database.
     services:
       postgres:
         image: postgres:16-alpine
@@ -25,13 +57,17 @@ jobs:
           --health-retries 10
 
     env:
+      NODE_ENV: test
+      # TEST_DATABASE_URL is what the harness actually reads: test/setup-e2e.ts
+      # copies it over DATABASE_URL in every Jest worker. DATABASE_URL is set
+      # too so the app's Joi validation passes when the module boots.
       DATABASE_URL: postgresql://postgres:postgres@localhost:5433/ecommerce_test
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5433/ecommerce_test
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
@@ -40,16 +76,11 @@ jobs:
         run: npm ci
 
       - name: Generate Prisma client
-        run: npx prisma generate
+        run: npm run prisma:generate
 
-      - name: Lint
-        run: npm run lint:ci
-
-      - name: Build
-        run: npm run build
-
-      - name: Unit tests
-        run: npm test
-
+      # Schema application is owned by test/global-setup.ts, which runs
+      # `prisma migrate deploy` once per run and skips while no migrations
+      # exist. Migrations are the only sanctioned path to schema changes,
+      # so there is deliberately no `prisma db push` here.
       - name: E2E tests
         run: npm run test:e2e

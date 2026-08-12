@@ -1,5 +1,7 @@
 # E-commerce Backend
 
+[![CI](https://github.com/mohatab/ecommerce-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/mohatab/ecommerce-backend/actions/workflows/ci.yml)
+
 A production-grade e-commerce backend, built as a portfolio project to demonstrate clean, maintainable backend architecture.
 
 ## Tech Stack
