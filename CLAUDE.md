@@ -59,6 +59,8 @@ A production-grade e-commerce backend, built as a portfolio project for a backen
 - E2E tests run against a dedicated Postgres on port 5433 (`docker compose up -d postgres-test`), addressed by `TEST_DATABASE_URL`. `test/setup-e2e.ts` redirects `DATABASE_URL` per worker; `test/global-setup.ts` applies migrations once per run.
 - Use `createTestApp()` from `test/helpers/create-test-app.ts` so tests exercise the real pipes, filters, prefix, and versioning.
 - Reset state between tests with `truncateAll()` from `test/helpers/truncate.ts`.
+- The e2e suite runs serially (`maxWorkers: 1` in `test/jest-e2e.json`). `truncateAll()` reads `pg_tables` and builds a `TRUNCATE` from the result with no lock between the two statements, so concurrent workers sharing one database can race — confirmed to fail intermittently on a cold cache. Do not raise `maxWorkers` until per-worker database isolation exists.
+- Test factories (`test/factories/`) must insert rows through the Prisma client, never `$executeRaw`/`$queryRaw`. IDs use `@default(uuid(7))`, which Prisma generates client-side — the migration's SQL has no database-level default, so a raw insert gets no id.
 - `test/` is the one place outside `src/config/` allowed to read `process.env` directly — it must configure the environment before the app boots.
 
 ## Database Conventions
