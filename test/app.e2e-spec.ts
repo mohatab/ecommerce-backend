@@ -1,19 +1,17 @@
-import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
-import { AppModule } from './../src/app.module';
+import { createTestApp } from './helpers/create-test-app';
 
 describe('HealthController (e2e)', () => {
   let app: INestApplication<App>;
 
-  beforeEach(async () => {
-    const moduleFixture: TestingModule = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
+  beforeAll(async () => {
+    app = await createTestApp();
+  });
 
-    app = moduleFixture.createNestApplication();
-    await app.init();
+  afterAll(async () => {
+    await app.close();
   });
 
   it('/health (GET) reports ok when the database is reachable', () => {
@@ -25,9 +23,5 @@ describe('HealthController (e2e)', () => {
         expect(body.status).toBe('ok');
         expect(typeof body.timestamp).toBe('string');
       });
-  });
-
-  afterEach(async () => {
-    await app.close();
   });
 });

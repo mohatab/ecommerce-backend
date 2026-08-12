@@ -6,9 +6,34 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { Request, Response } from 'express';
 
 const SERVER_ERROR_THRESHOLD: number = HttpStatus.INTERNAL_SERVER_ERROR;
+
+interface MappedPrismaError {
+  statusCode: number;
+  message: string;
+  error: string;
+}
+
+const PRISMA_ERROR_MAP: Record<string, MappedPrismaError> = {
+  P2002: {
+    statusCode: HttpStatus.CONFLICT,
+    message: 'A record with these values already exists',
+    error: 'Conflict',
+  },
+  P2003: {
+    statusCode: HttpStatus.CONFLICT,
+    message: 'Related record constraint violated',
+    error: 'Conflict',
+  },
+  P2025: {
+    statusCode: HttpStatus.NOT_FOUND,
+    message: 'The requested record was not found',
+    error: 'Not Found',
+  },
+};
 
 interface ErrorResponseBody {
   statusCode: number;
@@ -67,6 +92,14 @@ export class HttpExceptionFilter implements ExceptionFilter {
       const error = (responseObj.error as string | undefined) ?? exception.name;
 
       return { statusCode: status, message, error };
+    }
+
+    if (exception instanceof Prisma.PrismaClientKnownRequestError) {
+      const mapped = PRISMA_ERROR_MAP[exception.code];
+
+      if (mapped) {
+        return mapped;
+      }
     }
 
     return {

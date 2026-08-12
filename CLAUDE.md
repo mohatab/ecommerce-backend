@@ -25,6 +25,7 @@ A production-grade e-commerce backend, built as a portfolio project for a backen
 - `src/prisma/` is the only database access layer. `PrismaService` is the only place `PrismaClient` is instantiated.
 - Fail fast: invalid/missing env vars abort boot (via Joi validation), errors are never swallowed silently.
 - Nothing is implemented ahead of its phase (see Important Constraints).
+- All application-level configuration (helmet, CORS, prefix, versioning, pipes, filters, shutdown hooks) lives in `configureApp()` in `src/bootstrap.ts`, so runtime and e2e tests are configured identically. `main.ts` owns only Swagger and `listen()`.
 
 ## Module Boundaries
 
@@ -44,7 +45,7 @@ A production-grade e-commerce backend, built as a portfolio project for a backen
 
 - Never hardcode secrets or credentials. All configuration comes from environment variables, validated in `src/config/env.validation.ts`.
 - `.env` is gitignored and never committed. `.env.example` must stay in sync with every env var actually read by the app.
-- `helmet()` and config-driven CORS in `main.ts` are mandatory — don't remove or bypass them.
+- `helmet()` and config-driven CORS in `configureApp()` (`src/bootstrap.ts`) are mandatory — don't remove or bypass them.
 - Every mutating endpoint requires a validated DTO; the global `ValidationPipe` (`whitelist`, `forbidNonWhitelisted`, `transform`) must stay enabled.
 - Once auth exists: passwords are hashed, tokens are signed with a secret from env, and neither is ever logged.
 - Client-facing errors never leak internals (stack traces, SQL, raw exception messages) — always go through `HttpExceptionFilter`.
@@ -55,6 +56,10 @@ A production-grade e-commerce backend, built as a portfolio project for a backen
 - Critical flows (auth, orders, payments once they exist) require e2e coverage in `test/`.
 - New endpoints get at least one e2e test against a real (dockerized) Postgres instance.
 - `npm test` and `npm run test:e2e` must pass before a feature is considered complete.
+- E2E tests run against a dedicated Postgres on port 5433 (`docker compose up -d postgres-test`), addressed by `TEST_DATABASE_URL`. `test/setup-e2e.ts` redirects `DATABASE_URL` per worker; `test/global-setup.ts` applies migrations once per run.
+- Use `createTestApp()` from `test/helpers/create-test-app.ts` so tests exercise the real pipes, filters, prefix, and versioning.
+- Reset state between tests with `truncateAll()` from `test/helpers/truncate.ts`.
+- `test/` is the one place outside `src/config/` allowed to read `process.env` directly — it must configure the environment before the app boots.
 
 ## Database Conventions
 
@@ -62,13 +67,21 @@ A production-grade e-commerce backend, built as a portfolio project for a backen
 - A model is added only in the phase that owns it (e.g. the `Product` model arrives with the products module, not before).
 - The database is accessed only through `PrismaService` — no ad hoc `pg` clients or raw connections elsewhere.
 - Migrations are committed to git and never edited retroactively once applied/merged.
+- Primary keys are UUID v7 strings (`@default(uuid(7))`).
+- Money is stored as integer minor units (`priceCents Int`) plus a `currency` field. Floating-point money is banned.
+- Every model carries `createdAt` and `updatedAt`.
+- Models are PascalCase singular with camelCase fields; `@@map`/`@map` render snake_case plural tables.
 
 ## API Conventions
 
 - Every endpoint is documented with Swagger decorators (`@ApiTags`, `@ApiOperation`, `@ApiResponse`).
 - REST, resource-based routes with plural nouns (`/health`, `/products`, `/orders`, ...).
 - Consistent error response shape from `HttpExceptionFilter`: `{ statusCode, message, error, timestamp, path }`.
-- API versioning/prefix strategy is intentionally undecided — settle it when the first real domain module (likely `auth`) lands, not before.
+- Global prefix `api` + URI versioning, default version `1` — all domain routes live under `/api/v1/*`.
+- `/health` is excluded from both the prefix and versioning (`VERSION_NEUTRAL`) so infrastructure probes have a stable path.
+- Single resources are returned bare; collections are wrapped as `{ data, meta }` using `PaginatedDto` from `src/common/dto/`.
+- Controllers never return Prisma model objects directly — each module defines response DTOs with a static `from()` mapper. `@Exclude()` silently does nothing on Prisma's plain objects, so explicit mapping is the only thing that actually prevents field leaks.
+- List endpoints accept `PaginationQueryDto` and document their response with `@ApiPaginatedResponse(Model)`.
 
 ## Git Conventions
 
