@@ -7,5 +7,6 @@
     "^.+\\.(t|j)s$": "ts-jest"
   },
   "globalSetup": "<rootDir>/global-setup.ts",
-  "setupFilesAfterEnv": ["<rootDir>/setup-e2e.ts"]
+  "setupFilesAfterEnv": ["<rootDir>/setup-e2e.ts"],
+  "maxWorkers": 1
 }
