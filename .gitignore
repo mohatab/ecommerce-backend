@@ -20,6 +20,9 @@ npm-debug.log*
 .vscode/
 .idea/
 
+# local agent tooling preferences
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
