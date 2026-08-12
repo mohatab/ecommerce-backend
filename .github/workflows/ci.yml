@@ -84,3 +84,16 @@ jobs:
       # so there is deliberately no `prisma db push` here.
       - name: E2E tests
         run: npm run test:e2e
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+
+    # The Dockerfile is the designated deploy unit, so it is built on every
+    # push and PR to catch breakage at the commit that causes it. Build only:
+    # no tag push, no registry login, no publish — that belongs to Phase 6.
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build image
+        run: docker build -t ecommerce-backend:ci .
