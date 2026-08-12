@@ -3,6 +3,7 @@ import {
   Get,
   Logger,
   ServiceUnavailableException,
+  VERSION_NEUTRAL,
 } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -13,7 +14,7 @@ interface HealthStatus {
 }
 
 @ApiTags('health')
-@Controller('health')
+@Controller({ path: 'health', version: VERSION_NEUTRAL })
 export class HealthController {
   private readonly logger = new Logger(HealthController.name);
 
