@@ -229,7 +229,7 @@ Every service containing business logic gets unit tests with `PrismaService` and
 
 **Rationale for truncation over alternatives.** Per-test transaction rollback is faster but breaks precisely where correctness matters most: Phase 3 checkout opens its own `$transaction`, and nesting it inside a test transaction does not reproduce production behaviour. Testcontainers is more hermetic but adds a dependency and ~10–20s of startup to every run. Truncation is fast, simple, and behaviourally identical to production.
 
-- Shared fixture builders live in `test/factories/` so phases do not reinvent user and product fixtures.
+- Shared fixture builders live in `test/factories/` so phases do not reinvent user and product fixtures. These arrive in Phase 1 alongside the first model; Phase F ships only the harness (`test/helpers/`), since there is nothing to build fixtures for yet.
 - Every new endpoint gets at least one e2e test.
 - Critical flows — auth, orders, payments — require e2e coverage.
 
@@ -261,7 +261,7 @@ Every service containing business logic gets unit tests with `PrismaService` and
 3. `HttpExceptionFilter` maps `P2002`, `P2025`, and `P2003`, with unit tests for each.
 4. `ValidationPipe` sets `enableImplicitConversion: false`.
 5. `docker-compose.yml` runs a test Postgres on `5433`; `TEST_DATABASE_URL` is added to `.env.example` and the Joi schema.
-6. Jest global setup migrates the test database; `truncateAll()` and `test/factories/` exist.
+6. Jest global setup migrates the test database; `truncateAll()` and `createTestApp()` exist in `test/helpers/`. (`test/factories/` is deferred to Phase 1, when the first model exists.)
 7. GitHub Actions runs lint → build → unit tests → e2e against a Postgres service container.
 8. `CLAUDE.md` is updated with the conventions in this spec, replacing the deferred-versioning note.
 
