@@ -18,6 +18,7 @@ A production-grade e-commerce backend, built as a portfolio project to demonstra
 This project is being built incrementally, phase by phase. Current phase: **project initialization**.
 
 - ✅ Project structure, config validation, Prisma wiring, health check, Swagger, Docker (Postgres)
+- ✅ Foundation: `/api/v1` versioning, pagination primitives, Prisma error mapping, e2e harness, CI
 - ⬜ Authentication (JWT)
 - ⬜ Products
 - ⬜ Orders
@@ -40,7 +41,7 @@ npm install
 # 2. Copy environment variables
 cp .env.example .env
 
-# 3. Start PostgreSQL
+# 3. Start PostgreSQL (dev on 5432, test on 5433)
 docker compose up -d
 
 # 4. Generate the Prisma client
@@ -59,6 +60,7 @@ The API will be available at `http://localhost:3000`, with Swagger docs at `http
 | `npm run start:dev`      | Run the app in watch mode            |
 | `npm run build`          | Compile the app                      |
 | `npm run lint`           | Lint and auto-fix                    |
+| `npm run lint:ci`        | Lint without auto-fixing (used by CI)|
 | `npm test`               | Run unit tests                       |
 | `npm run test:e2e`       | Run end-to-end tests                 |
 | `npm run prisma:generate`| Regenerate the Prisma client         |
@@ -68,7 +70,8 @@ The API will be available at `http://localhost:3000`, with Swagger docs at `http
 
 ```
 src/
-  main.ts            # application bootstrap (Swagger, pipes, filters, security middleware)
+  main.ts            # application bootstrap (Swagger, listen)
+  bootstrap.ts        # configureApp() — shared runtime/test configuration
   app.module.ts       # composition root
   config/             # environment validation + typed configuration
   common/             # cross-cutting concerns (filters, interceptors, etc.)
@@ -77,4 +80,6 @@ src/
 prisma/
   schema.prisma        # Prisma schema (datasource + generator)
 test/                  # e2e tests
+  helpers/             # createTestApp, truncateAll
+  fixtures/            # controllers used only by tests
 ```
