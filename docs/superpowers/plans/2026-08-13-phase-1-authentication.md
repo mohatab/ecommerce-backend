@@ -83,6 +83,7 @@ Goes first so every later task can read `jwt.*` from `ConfigService` instead of 
 - Modify: `src/config/env.validation.ts`
 - Modify: `src/config/configuration.ts`
 - Modify: `.github/workflows/ci.yml`
+- Modify: `src/config/env.validation.spec.ts` (already exists — extend with the JWT rules, Step 4)
 - Test: `src/config/configuration.spec.ts` (create)
 
 **Interfaces:**
@@ -187,6 +188,36 @@ In `src/config/env.validation.ts`, add to the schema object:
 
 `min(32)` makes a weak secret abort boot rather than silently producing forgeable tokens.
 
+**Extend `src/config/env.validation.spec.ts` in the same commit.** That suite already exists and covers the pre-Phase-1 schema; the three JWT rules are the first with real security weight, so they do not ship untested. Add `JWT_SECRET` to the `validEnv()` helper — it is the one place the minimal-valid environment is defined, so every existing test keeps passing — then add:
+
+```ts
+    it('rejects a missing JWT_SECRET', () => {
+      const env = validEnv();
+      delete env.JWT_SECRET;
+
+      expect(rejectedKeys(validate(env).error)).toContain('JWT_SECRET');
+    });
+
+    it('rejects a JWT_SECRET below the 32-character floor', () => {
+      const { error } = validate(validEnv({ JWT_SECRET: 'a'.repeat(31) }));
+
+      expect(rejectedKeys(error)).toContain('JWT_SECRET');
+    });
+
+    it('accepts a JWT_SECRET at exactly the floor', () => {
+      expect(validate(validEnv({ JWT_SECRET: 'a'.repeat(32) })).error).toBeUndefined();
+    });
+
+    it('defaults the token lifetimes', () => {
+      const { value } = validate(validEnv());
+
+      expect(value.JWT_ACCESS_TTL).toBe('15m');
+      expect(value.JWT_REFRESH_TTL).toBe('7d');
+    });
+```
+
+Add `JWT_SECRET: string; JWT_ACCESS_TTL: string; JWT_REFRESH_TTL: string;` to the `ValidatedEnv` interface. Run `npm test -- env.validation` before and after the Joi change: the two rejection tests must fail first, or they are not testing the rule you just wrote.
+
 - [ ] **Step 5: Document the vars**
 
 Append to `.env.example`:
@@ -234,8 +265,9 @@ Expected: all pass. E2E now requires `JWT_SECRET` in `.env` — if it is missing
 - [ ] **Step 9: Commit**
 
 ```bash
-git add .env.example src/config/env.validation.ts src/config/configuration.ts \
-        src/config/configuration.spec.ts .github/workflows/ci.yml
+git add .env.example src/config/env.validation.ts src/config/env.validation.spec.ts \
+        src/config/configuration.ts src/config/configuration.spec.ts \
+        .github/workflows/ci.yml
 git commit -m "feat: add JWT configuration with Joi validation"
 ```
 
