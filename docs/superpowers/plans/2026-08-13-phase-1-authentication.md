@@ -82,6 +82,7 @@ Goes first so every later task can read `jwt.*` from `ConfigService` instead of 
 - Modify: `.env.example`
 - Modify: `src/config/env.validation.ts`
 - Modify: `src/config/configuration.ts`
+- Modify: `.github/workflows/ci.yml`
 - Test: `src/config/configuration.spec.ts` (create)
 
 **Interfaces:**
@@ -208,7 +209,21 @@ npm test -- configuration
 
 Expected: PASS, 2 tests.
 
-- [ ] **Step 7: Verify nothing regressed**
+- [ ] **Step 7: Give CI the secret — this is not optional**
+
+`JWT_SECRET` is now `required()` in Joi, and **CI has no `.env` file**. Without this step the e2e job aborts at `AppModule` boot and *every* e2e test fails with a Joi error, in a job that was green a moment ago.
+
+In `.github/workflows/ci.yml`, add to the `e2e` job's `env:` block:
+
+```yaml
+      # No .env exists in CI, so every Joi-required variable must be set here.
+      # A throwaway value: CI signs and verifies within a single run.
+      JWT_SECRET: ci-only-secret-not-used-outside-continuous-integration
+```
+
+The `build` job needs nothing — unit tests construct providers directly via `Test.createTestingModule` and never boot `AppModule`, so Joi validation does not run there.
+
+- [ ] **Step 8: Verify nothing regressed**
 
 ```bash
 npm run lint && npm run build && npm test && npm run test:e2e
@@ -216,10 +231,11 @@ npm run lint && npm run build && npm test && npm run test:e2e
 
 Expected: all pass. E2E now requires `JWT_SECRET` in `.env` — if it is missing, the app aborts at boot with a Joi error naming the variable. That is the fail-fast behaviour working.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add .env.example src/config/env.validation.ts src/config/configuration.ts src/config/configuration.spec.ts
+git add .env.example src/config/env.validation.ts src/config/configuration.ts \
+        src/config/configuration.spec.ts .github/workflows/ci.yml
 git commit -m "feat: add JWT configuration with Joi validation"
 ```
 
@@ -1604,6 +1620,7 @@ import {
   HttpStatus,
   Post,
   Req,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
@@ -1666,10 +1683,18 @@ export class AuthController {
   @Get('me')
   @ApiOperation({ summary: 'Return the authenticated principal' })
   @ApiResponse({ status: 200, description: 'The current user' })
+  @ApiResponse({ status: 401, description: 'Missing, invalid, or orphaned token' })
   async me(@Req() request: Request): Promise<UserResponseDto> {
     const user = await this.usersService.findById(request.user!.sub);
 
-    return UserResponseDto.from(user!);
+    // A structurally valid token whose user row is gone (deleted account,
+    // wiped database) must read as unauthorized. Asserting non-null here
+    // would throw a TypeError and surface as a 500.
+    if (!user) {
+      throw new UnauthorizedException();
+    }
+
+    return UserResponseDto.from(user);
   }
 }
 ```
@@ -1946,10 +1971,11 @@ git commit -m "feat: add global fail-closed JwtAuthGuard with @Public opt-out"
 
 **Files:**
 - Modify: `src/app.module.ts`, `src/modules/auth/auth.controller.ts`, `package.json`
+- Modify: `test/helpers/create-test-app.ts`
 - Test: `test/auth-throttle.e2e-spec.ts` (create)
 
 **Interfaces:**
-- Produces: a 100 req/60 s global limit and a 5 req/60 s limit on `register`, `login`, and `refresh`.
+- Produces: a 100 req/60 s global limit, a 5 req/60 s limit on `register`, `login`, and `refresh`, and `createTestApp(extraImports?, options?)` where `options.throttleLimit` raises the cap for suites that are not testing throttling.
 
 - [ ] **Step 1: Install**
 
@@ -2014,10 +2040,12 @@ Expected: FAIL — the sixth request returns 401, not 429.
 In `src/app.module.ts`, add to `imports`:
 
 ```ts
-    ThrottlerModule.forRoot([
-      { name: 'default', ttl: 60_000, limit: 100 },
-      { name: 'auth', ttl: 60_000, limit: 5 },
-    ]),
+    // ONE throttler, not two. ThrottlerGuard evaluates every configured
+    // throttler on every request, so registering a second "auth" entry at
+    // limit 5 would cap /health, /auth/me and /api/v1/ping at 5 req/min too
+    // and break routing.e2e-spec.ts. Stricter auth limits come from a
+    // per-route @Throttle() override of this same throttler instead.
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
 ```
 
 and register the guard **before** `JwtAuthGuard` in `providers`:
@@ -2038,24 +2066,80 @@ with `import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';`.
 In `src/modules/auth/auth.controller.ts`, add to `register`, `login`, and `refresh`:
 
 ```ts
-  @Throttle({ auth: { ttl: 60_000, limit: 5 } })
+  // Overrides the default throttler for this route only. The key must be
+  // `default` — that is the name ThrottlerModule.forRoot assigns when no
+  // explicit name is given.
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
 ```
 
 with `import { Throttle } from '@nestjs/throttler';`.
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [ ] **Step 6: Let non-throttling suites opt out of the limit**
+
+Without this, Task 12 is unimplementable. `createTestApp()` is called once per suite in `beforeAll`, so the in-memory throttle store is shared by every test in the file. Task 12's flow suite issues **7 `register` calls and 6 `refresh` calls** against a limit of 5 — its last tests would return 429 while appearing to be rotation bugs.
+
+Raising the production limit to accommodate tests would be tuning security to suit the suite, and would break again the moment a test is added. Instead, let a suite state explicitly that it is not the throttling test.
+
+Replace `test/helpers/create-test-app.ts` with:
+
+```ts
+import { INestApplication, ModuleMetadata } from '@nestjs/common';
+import { Test, TestingModule } from '@nestjs/testing';
+import { THROTTLER_OPTIONS } from '@nestjs/throttler';
+import { App } from 'supertest/types';
+import { AppModule } from '../../src/app.module';
+import { configureApp } from '../../src/bootstrap';
+
+export interface CreateTestAppOptions {
+  /**
+   * Raises the rate limit for suites that exercise many auth requests and
+   * are not testing throttling. Omit it to run the real production limits —
+   * auth-throttle.e2e-spec.ts depends on that default.
+   */
+  throttleLimit?: number;
+}
+
+export async function createTestApp(
+  extraImports: NonNullable<ModuleMetadata['imports']> = [],
+  options: CreateTestAppOptions = {},
+): Promise<INestApplication<App>> {
+  const builder = Test.createTestingModule({
+    imports: [AppModule, ...extraImports],
+  });
+
+  if (options.throttleLimit !== undefined) {
+    builder
+      .overrideProvider(THROTTLER_OPTIONS)
+      .useValue([{ ttl: 60_000, limit: options.throttleLimit }]);
+  }
+
+  const moduleFixture: TestingModule = await builder.compile();
+
+  const app = moduleFixture.createNestApplication<INestApplication<App>>();
+  configureApp(app);
+  await app.init();
+
+  return app;
+}
+```
+
+The default path is byte-identical to today's behaviour, so `app.e2e-spec.ts`, `routing.e2e-spec.ts`, `auth-guard.e2e-spec.ts`, and `auth-throttle.e2e-spec.ts` are unaffected.
+
+- [ ] **Step 7: Run the tests to verify they pass**
 
 ```bash
 npm run test:e2e -- auth-throttle
+npm run test:e2e
 ```
 
-Expected: PASS, 1 test.
+Expected: `auth-throttle` PASS, 1 test. Full suite PASS — in particular `routing.e2e-spec.ts` must still pass all nine tests, which is what proves the single-throttler fix from Step 4 was correct.
 
-- [ ] **Step 7: Full verification and commit**
+- [ ] **Step 8: Full verification and commit**
 
 ```bash
 npm run lint && npm run build && npm test && npm run test:e2e
-git add package.json package-lock.json src/app.module.ts src/modules/auth/auth.controller.ts test/auth-throttle.e2e-spec.ts
+git add package.json package-lock.json src/app.module.ts src/modules/auth/auth.controller.ts \
+        test/helpers/create-test-app.ts test/auth-throttle.e2e-spec.ts
 git commit -m "feat: add global and auth-specific rate limiting"
 ```
 
@@ -2095,7 +2179,12 @@ describe('authentication (e2e)', () => {
   let prisma: PrismaService;
 
   beforeAll(async () => {
-    app = await createTestApp();
+    // This suite issues 7 register and 6 refresh calls against a production
+    // limit of 5/min, and the throttle store is shared across the whole file.
+    // Without a raised cap the later tests 429 and look like rotation bugs.
+    // Throttling itself is covered by auth-throttle.e2e-spec.ts, which uses
+    // the real limits.
+    app = await createTestApp([], { throttleLimit: 1000 });
     prisma = app.get(PrismaService);
   });
 
@@ -2301,3 +2390,7 @@ git commit -m "docs: record Phase 1 authentication conventions"
 | §10 Required e2e list | 10, 11, 12 |
 
 **Deliberately not built:** `RolesGuard`/`@Roles()` (Phase 2), refresh-token cleanup job (Phase 5 BullMQ), Redis-backed throttler storage (Phase 5), CORS tightening (Phase 6). The pagination primitives gain no consumer in this phase and remain unproven until Phase 2.
+
+**Known gap handed to Phase 2:** nothing in this phase can create an `ADMIN`. Registration hardcodes `CUSTOMER` and no other code path writes `role`. Tests are unaffected — `createUser(prisma, { role: Role.ADMIN })` works — but the **live deployed API**, which the foundation spec names as a success criterion, would have no administrator and no way to appoint one. Phase 2 needs a seed script or a one-off promotion path before its admin routes are reachable in the demo. Recorded here so it is a decision rather than a discovery.
+
+**Throttling and the test suite:** production limits are 100/min globally and 5/min on the three auth routes. Suites that exercise many auth requests without testing throttling pass `{ throttleLimit: … }` to `createTestApp()`; `auth-throttle.e2e-spec.ts` deliberately does not, so the real limits stay covered. If a future suite starts returning unexplained 429s, this is why.
