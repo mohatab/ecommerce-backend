@@ -758,6 +758,8 @@ git commit -m "feat: add users module with service-only scope"
 
 No database access, so it is fully unit-testable without mocking Prisma.
 
+**Algorithm: HS256.** `JwtModule.register({ secret: SECRET })` below signs and verifies with the single shared `JWT_SECRET` from Task 1 — this is HS256 by library default with a string secret, made explicit here rather than left implicit. No keypair; see spec §15.1 for why asymmetric signing isn't warranted in a single-service deployment.
+
 **Files:**
 - Create: `src/modules/auth/token.service.ts`
 - Create: `src/modules/auth/types/authenticated-user.ts`
@@ -766,7 +768,7 @@ No database access, so it is fully unit-testable without mocking Prisma.
 
 **Interfaces:**
 - Produces:
-  - `AuthenticatedUser` — `{ sub: string; email: string; role: Role }`
+  - `AuthenticatedUser` — `{ sub: string; role: Role }` (no `email` — see spec §15.2: nothing in this plan reads it off the token, `/auth/me` refetches from the database)
   - `TokenService.signAccessToken(user: User): Promise<string>`
   - `TokenService.verifyAccessToken(token: string): Promise<AuthenticatedUser>`
   - `TokenService.generateRefreshToken(): string` — 32 random bytes, base64url
@@ -783,12 +785,13 @@ npm install @nestjs/jwt
 
 Create `src/modules/auth/types/authenticated-user.ts`. The Express augmentation is what lets `request.user` typecheck under `strict`.
 
+**No `email` field.** Nothing in this plan reads `request.user.email` or `payload.email` — `AuthService.logout` and `AuthController.me` both key off `.sub` only, and `/auth/me` returns email by refetching the user row from the database, not from the token. `role` stays: Phase 2's `RolesGuard` reads it directly, per spec §15.2.
+
 ```ts
 import { Role } from '@prisma/client';
 
 export interface AuthenticatedUser {
   sub: string;
-  email: string;
   role: Role;
 }
 
@@ -838,17 +841,22 @@ describe('TokenService', () => {
     service = module.get<TokenService>(TokenService);
   });
 
-  it('signs an access token carrying id, email and role', async () => {
+  it('signs an access token carrying the user id and role', async () => {
     const token = await service.signAccessToken(user);
     const payload = await service.verifyAccessToken(token);
 
     expect(payload.sub).toBe('user-1');
-    expect(payload.email).toBe('a@example.test');
     expect(payload.role).toBe(Role.CUSTOMER);
   });
 
   it('rejects a malformed token', async () => {
-    await expect(service.verifyAccessToken('not.a.token')).rejects.toBeDefined();
+    // toBeInstanceOf(Error), not toBeDefined() — the latter would pass even if
+    // the underlying library rejected with a bare string. verifyAccessToken
+    // does not catch or rewrap this; JwtAuthGuard (Task 10) already collapses
+    // every failure shape to a generic 401 (spec §15.3).
+    await expect(service.verifyAccessToken('not.a.token')).rejects.toBeInstanceOf(
+      Error,
+    );
   });
 
   it('generates unique high-entropy refresh tokens', () => {
@@ -910,7 +918,6 @@ export class TokenService {
   async signAccessToken(user: User): Promise<string> {
     const payload: AuthenticatedUser = {
       sub: user.id,
-      email: user.email,
       role: user.role,
     };
 
