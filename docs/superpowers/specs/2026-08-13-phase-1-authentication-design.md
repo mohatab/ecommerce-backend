@@ -205,6 +205,8 @@ Phase 1 has **no role-restricted endpoint**. `UsersModule` is service-only by §
 
 `User.role` **does** ship in Phase 1, because registration must assign a default and the column cannot be usefully backfilled with intent later. Phase 2 adds the guard **together with** `POST /api/v1/products` and a 403 e2e test that proves it.
 
+**Blocker this deferral creates for Phase 2.** Nothing in Phase 1 can produce an `ADMIN`: registration hardcodes `CUSTOMER`, and no other code path writes `role`. So `RolesGuard` and an admin-bootstrap mechanism (seed script or one-off promotion) **must land in the same phase, and should land in the same change**. Shipping the guard without bootstrap gives a control that protects routes no real account can reach — verifiable only through `createUser(prisma, { role: Role.ADMIN })` in tests, which is precisely the untested-in-production pattern §7 defers the guard to avoid. It would also leave the live deployed API, a success criterion in foundation spec §1, with no administrator. Treat this as a Phase 2 entry condition, not a nice-to-have.
+
 ---
 
 ## 8. API surface
@@ -287,6 +289,8 @@ Phase F shipped primitives that are correct by inspection but, in several cases,
 | **Serialized e2e under real load** | 3 suites, one touching tables | Several DB-heavy auth suites in strict series |
 
 **Explicitly still unproven after Phase 1:** `PaginationQueryDto`, `PaginatedDto`, and `@ApiPaginatedResponse` have **zero consumers** and gain none here — Phase 1 has no list endpoint, because `UsersModule` ships without a controller. They wait for Phase 2. **P2003** (foreign-key violation) likewise probably stays untriggered, since `onDelete: Cascade` handles the only deletion path Phase 1 creates. The foundation is not fully validated at the end of Phase 1, and this document should not be read as claiming otherwise.
+
+**Instruction for Phase 2 — reshape the DTO, not the endpoint.** These three were written against no real query. When the first list endpoint arrives and the DTO does not fit what it actually needs — sort contract, filter shape, or the offset/cursor decision — **change the DTO**. Do not contort the endpoint to preserve a speculatively-written shape. Nothing depends on them yet, so the cost of changing them is currently zero and will never be lower. (Note that moving from offset to cursor would also amend foundation spec §5, which chose offset deliberately; that is a spec change, not a silent DTO edit.)
 
 ---
 
