@@ -1,8 +1,8 @@
 # Phase 1 — Authentication Design Spec
 
-**Status:** draft for review
+**Status:** reviewed — §13 open items closed and §5 verified on 2026-08-13; ready for implementation
 **Depends on:** `2026-08-12-foundation-architecture-design.md` (the foundation spec), Phase F as merged
-**Owns:** `User`, `RefreshToken`, the first committed migration, `UsersModule` (service-only), `AuthModule`, the global `JwtAuthGuard`, `@nestjs/throttler`, `test/factories/`
+**Owns:** `User`, `RefreshToken`, the first committed migration, `UsersModule` (service-only), `AuthModule`, the global `JwtAuthGuard`, `src/common/decorators/public.decorator.ts`, `@nestjs/throttler`, `test/factories/`
 
 ---
 
@@ -28,9 +28,10 @@ Everything here is grounded in what this repository actually does — the founda
 | Token transport | JSON response body + `Authorization: Bearer` | No — §1 |
 | Role model | `Role` enum column | No |
 | `RolesGuard` | **Deferred to Phase 2** | **Yes** — §9 lists "roles" under Phase 1 |
+| `@Public()` / guard placement | `@Public()` in `common/`, guard in `auth/` | **Yes** — §2 puts both in `common/` |
 | Throttling | Global 100/60s; auth routes 5/60s | No |
 
-Two deliberate deviations, each argued in place: §4.2 (SHA-256 for refresh tokens) and §7 (`RolesGuard` deferred to Phase 2). §5 picks an Argon2id *implementation* and is a refinement of §7 of the foundation spec, not a departure from it.
+Three deliberate deviations, each argued in place: §4.2 (SHA-256 for refresh tokens), §7 (`RolesGuard` deferred to Phase 2), and §8 (`@Public()` in `common/`, `JwtAuthGuard` in `auth/`). §5 picks an Argon2id *implementation* and is a refinement of §7 of the foundation spec, not a departure from it.
 
 ---
 
@@ -177,7 +178,27 @@ The widely-used `argon2` package falls back to a node-gyp compile whenever no ma
 
 `@node-rs/argon2` ships Rust/napi prebuilds including musl targets, defaults to Argon2id, and requires no toolchain. It keeps a freshly-verified Dockerfile untouched.
 
-**This must be verified, not assumed.** A real `docker build` runs before the implementation PR to confirm the prebuild actually resolves on `node:20-alpine`. "Ships prebuilds" is a README claim, and this repository has twice found that correct-by-inspection is not the same as proven. **Fallback if it fails:** add `python3 make g++` to the *build stage only*, leaving the runtime stage — and therefore the shipped image — clean.
+**This must be verified, not assumed** — "ships prebuilds" is a README claim, and this repository has twice found that correct-by-inspection is not the same as proven.
+
+### ✅ Verified 2026-08-13 — no `Dockerfile` change needed
+
+A throwaway `node:20-alpine` build was run against this repository's real `package-lock.json`, with no `python3`/`make`/`g++` present:
+
+| Check | Result |
+|---|---|
+| `npm ci --omit=dev` on bare alpine | **passed** |
+| `npm install @node-rs/argon2` | **passed**, no node-gyp invoked |
+| Prebuild selected | `@node-rs/argon2-linux-x64-musl` |
+| Native binding loads and hashes | `$argon2id$v=19$m=19456,t=2,p=1$…` |
+
+Two things worth carrying into implementation:
+
+- **The library's defaults are already Argon2id at OWASP's recommended minimum** — 19 MiB memory, 2 iterations, parallelism 1. `PasswordHasherService` should call `hash()` with no options rather than inventing parameters.
+- The check covered `--omit=dev`, so the **runtime** stage is proven too, not just the build stage. That matters because `@node-rs/argon2` is a production dependency and the runtime stage does its own install.
+
+**Fallback, retained for the record and now unused:** had the prebuild failed, the fix was `apk add --no-cache python3 make g++` in the *build stage only*, leaving the runtime stage — and therefore the shipped image — clean.
+
+**Plan Task 3 Step 2 still runs `docker build` after the real `npm install`.** Keep it. This verification used a synthetic install; the plan's check exercises the committed `package-lock.json`, which is the artifact CI actually builds.
 
 **Test-suite consequence:** Argon2 is intentionally slow. Factories that do not exercise login must use a **precomputed hash constant**; only tests that actually verify a password may call the real hasher. Otherwise every fixture pays ~50–100 ms.
 
@@ -230,6 +251,25 @@ Every endpoint carries `@ApiTags`, `@ApiOperation`, `@ApiResponse`; protected ro
 ### Module boundaries
 
 `UsersModule` owns `User` and exports `UsersService` (`findByEmail`, `findById`, `create`) with **no controller**. `AuthModule` owns `RefreshToken`, hashing, tokens, and guards, and depends on `UsersService`. This is foundation spec §2 verbatim; the rationale is that Phase 4 needs a user's email for receipts without transitively importing the JWT stack.
+
+### Where `@Public()` and `JwtAuthGuard` live
+
+**Deliberate deviation.** Foundation spec §2's directory sketch places `jwt-auth.guard.ts`, `roles.guard.ts`, `public.decorator.ts`, `roles.decorator.ts`, and `current-user.decorator.ts` together under `src/common/`. Phase 1 splits them:
+
+| File | Location | Why |
+|---|---|---|
+| `@Public()` | `src/common/decorators/public.decorator.ts` | Consumed by `HealthModule` and the ping fixture |
+| `JwtAuthGuard` | `src/modules/auth/guards/jwt-auth.guard.ts` | Injects `TokenService` |
+
+The split is forced by dependency direction, and each half fails in the opposite way if placed with the other.
+
+Putting `@Public()` in `AuthModule` breaks a `CLAUDE.md` rule outright. The global guard means `/health` and `test/fixtures/ping.module.ts` must both opt out, so both must import the decorator — and `CLAUDE.md` states a module may depend on other modules only "through NestJS module imports — **never by reaching into another module's internal files directly**." `HealthModule` importing `src/modules/auth/decorators/…` is exactly that. The decorator itself is `SetMetadata(IS_PUBLIC_KEY, true)`: no auth dependency, no domain logic, consumed by unrelated modules. That is the definition of cross-cutting, and `CLAUDE.md` already lists guards and decorators as `src/common/` material.
+
+Putting `JwtAuthGuard` in `common/` inverts the layering instead. It injects `TokenService`, so `src/common/` — the cross-cutting layer every module depends on — would depend on a feature module. That is a worse violation than the one it would fix, and no rule in `CLAUDE.md` requires guards to live in `common/`; the rule constrains what may go *in* `common/`, not where guards must live. `app.module.ts` is the only file that references the guard, and as the composition root it is entitled to wire anything.
+
+**What this costs:** the two pieces of one mechanism sit in different directories, and the guard's import reads `'../../../common/decorators/public.decorator'`. No path aliases are configured in `tsconfig.json`, and adding them is out of scope for this phase.
+
+**Consequence for Phase 2.** `RolesGuard` follows `JwtAuthGuard` into `src/modules/auth/guards/`; `@Roles()` follows `@Public()` into `src/common/decorators/` if any module outside `auth` consumes it, and stays in `auth` if not. Apply the same test — dependency direction, not symmetry.
 
 ### Guard registration order
 
@@ -313,8 +353,76 @@ The guard lands at step 9, immediately after the controller, so it has a real ro
 
 ---
 
-## 13. Open items for the reviewer
+## 13. Resolved decisions
 
-1. **Registration returning tokens.** This design has `POST /auth/register` return an access + refresh pair immediately, so a new user is logged in. The alternative — 201 with the user only, forcing a separate login — is marginally more conventional and slightly easier to reason about. Low stakes either way; flagging rather than deciding unilaterally.
-2. **Token cleanup.** Expired `RefreshToken` rows accumulate forever. A scheduled purge is natural BullMQ work in Phase 5. Doing nothing until then is fine at portfolio scale, but it is a known unbounded-growth table and should be a conscious deferral.
-3. **`JWT_SECRET` minimum length.** Proposing 32 characters enforced by Joi. Arbitrary but defensible; say if you want a different floor.
+These three were flagged for a reviewer during design and are now settled. They are recorded here because the implementation plan already encodes them, and a spec that still called them open would disagree with the plan about its own state.
+
+### 13.1 Registration returns tokens — **yes**
+
+`POST /auth/register` returns an access + refresh pair alongside the user, so a new account is logged in immediately (201 with `AuthResponseDto`).
+
+The alternative — 201 with the user only, forcing a separate `POST /auth/login` — is marginally more conventional. It was rejected because it makes the Swagger demo path two calls instead of one for no security gain: the caller just proved possession of the password microseconds earlier, so issuing tokens reveals nothing a subsequent login would not. Low stakes either way; this is the more usable of two defensible options.
+
+**Implemented by:** plan Task 9, `AuthController.register` → `AuthResponseDto`.
+
+### 13.2 Expired token cleanup — **deferred to Phase 5**
+
+Expired and revoked `RefreshToken` rows accumulate with no purge. This is a **conscious deferral, not an oversight**: a scheduled purge is natural BullMQ work, and BullMQ arrives in Phase 5.
+
+Nothing breaks in the meantime. Rows are only ever looked up by `tokenHash` (unique index) or `familyId` (indexed), so query cost does not degrade with table size — this is a disk-growth concern, not a correctness or latency one, and at portfolio traffic the table will not reach a size worth managing. Recorded as a known unbounded-growth table so Phase 5 does not have to rediscover it.
+
+**Owner:** Phase 5.
+
+### 13.3 `JWT_SECRET` minimum length — **32 characters**
+
+Enforced by Joi: `JWT_SECRET: Joi.string().min(32).required()`.
+
+The floor is a round number rather than a derived one, but it is defensible: HS256 keys should carry at least as much entropy as the 256-bit digest they feed, and 32 characters is the shortest length at which a human-chosen-looking string plausibly clears that bar. `required()` matters more than the exact floor — it is what makes boot fail loudly rather than signing tokens with a weak or absent secret.
+
+**Consequence, already handled:** CI has no `.env`, so the e2e job must set `JWT_SECRET` in its `env:` block, in the same commit that makes it `required()` — per `CLAUDE.md`'s rule that a new env var lands in `.env.example` and the Joi schema together. Plan Task 1 Step 7 does this.
+
+**Implemented by:** plan Task 1.
+
+---
+
+## 14. How migrations will run in the deployed image
+
+Foundation spec §10 requires `prisma migrate deploy` to run **as a discrete release command, never at application boot** — running migrations at boot races across replicas and couples schema changes to process start. Phase 1 creates the project's first committed migration, which is what makes this question real, so the mechanism is settled here and implemented in Phase 6.
+
+### ✅ Verified 2026-08-13 — the shipped image can already run migrations
+
+The `prisma` CLI is a `devDependency` and the runtime stage runs `npm ci --omit=dev`, so the natural assumption is that the CLI is absent from the deploy unit. **That assumption is wrong, and it was tested rather than reasoned about.** Probing the real built image:
+
+| Check | Result |
+|---|---|
+| `npx prisma --version` | `prisma 6.19.3`, `@prisma/client 6.19.3` |
+| `npx prisma migrate deploy --help` | resolves — the command is reachable |
+| Query engine | `libquery_engine-linux-musl-openssl-3.0.x.so.node` present |
+| Schema | loaded from `prisma/schema.prisma` (`COPY prisma ./prisma` works) |
+
+**Why it survives `--omit=dev`:** `@prisma/client` declares `prisma` as an **optional peer dependency**. npm installs optional peers even when dev dependencies are omitted, which is why `package-lock.json` marks `node_modules/prisma` as `"devOptional": true` rather than `"dev": true`. `@prisma/engines` comes along as its dependency.
+
+### The decision: make it explicit in Phase 6
+
+Working and *intentionally* working are different things. The current behaviour rests on three things this project does not control:
+
+- Prisma continuing to declare `prisma` as an optional peer of `@prisma/client`
+- npm continuing to install optional peers under `--omit=dev`
+- nobody adding `--omit=optional` or `--no-optional` to the Dockerfile
+
+Any of those changing turns a green build into a release command that fails at deploy time, with nothing in CI to catch it. So: **move `prisma` from `devDependencies` to `dependencies` in Phase 6**, which declares the dependency the release command actually has instead of inheriting it by accident. This is hardening, not a fix — priority is low, and nothing blocks on it.
+
+| Option | Verdict |
+|---|---|
+| **Declare `prisma` in `dependencies`** | **Chosen** — states the real requirement; ~0 MB change, it is already installed |
+| Rely on the optional-peer transitive as-is | Rejected — works today, undeclared, silently breakable |
+| `npx prisma@6.19.3 migrate deploy` at release | Rejected — needs network at release, re-downloads per deploy, and the pinned version drifts from `package-lock.json` on the first Prisma upgrade |
+| A separate migration image or stage | Rejected — real operational complexity for a single-service deployment |
+
+### Phase 6 checklist
+
+1. Move `prisma` from `devDependencies` to `dependencies` in `package.json`. Image size is unaffected — it is already being installed.
+2. Configure the host's release command as `npx prisma migrate deploy`, resolving to the local install rather than the network.
+3. Add a CI step that **runs** the built image and probes `/health`. The `docker` job currently builds and discards, so nothing proves the deploy unit boots.
+
+Item 3 is the durable fix. This section had to be corrected once already because the image had never been executed anywhere — the original text asserted the CLI was missing, which one `docker run` disproved. Build-only CI produces exactly that class of confident, wrong claim.

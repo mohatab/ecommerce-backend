@@ -41,8 +41,8 @@
 | `src/modules/auth/auth.service.ts` | Orchestrates register / login / refresh / logout |
 | `src/modules/auth/auth.controller.ts` | The five auth routes |
 | `src/modules/auth/auth.module.ts` | Wires the above; exports `JwtAuthGuard` |
-| `src/modules/auth/decorators/public.decorator.ts` | `@Public()` opt-out marker |
-| `src/modules/auth/guards/jwt-auth.guard.ts` | Global fail-closed guard |
+| `src/common/decorators/public.decorator.ts` | `@Public()` opt-out marker — in `common/` because `HealthModule` and the ping fixture consume it (spec §8) |
+| `src/modules/auth/guards/jwt-auth.guard.ts` | Global fail-closed guard — stays in `auth/`, it depends on `TokenService` |
 | `src/modules/auth/dto/register.dto.ts` | Validated registration input |
 | `src/modules/auth/dto/login.dto.ts` | Validated login input |
 | `src/modules/auth/dto/refresh.dto.ts` | Validated refresh input |
@@ -366,7 +366,9 @@ docker build -t ecommerce-backend:argon2-check .
 
 Expected: SUCCESS, resolving `@node-rs/argon2-linux-x64-musl` without invoking node-gyp.
 
-**If this fails,** stop and report before writing more code. The fallback is to add build tooling to the **build stage only**, keeping the runtime image clean:
+**This was pre-verified on 2026-08-13** against this repository's `package-lock.json` on bare `node:20-alpine` — the musl prebuild resolved, no node-gyp ran, and the binding produced a real `$argon2id$` digest under `--omit=dev` (spec §5). This step re-runs it against the *committed* lockfile, which is what CI actually builds. It should pass; treat a failure as a genuine surprise.
+
+**If it fails,** stop and report before writing more code. The fallback is to add build tooling to the **build stage only**, keeping the runtime image clean:
 
 ```dockerfile
 FROM node:20-alpine AS build
@@ -1609,7 +1611,7 @@ export class AuthResponseDto {
 
 - [ ] **Step 3: Write the controller**
 
-Create `src/modules/auth/auth.controller.ts`. `@Public()` and `@CurrentUser` land in Task 10; for now every route is reachable because no guard exists yet.
+Create `src/modules/auth/auth.controller.ts`. `@Public()` lands in Task 10; for now every route is reachable because no guard exists yet. Authenticated routes read the principal from `request.user` via `@Req()` — there is no `@CurrentUser` decorator in this phase, and none is needed for five routes.
 
 ```ts
 import {
@@ -1777,7 +1779,7 @@ git commit -m "feat: add auth endpoints with explicit response DTOs"
 **This task breaks `/health` and the ping fixture until they are marked `@Public()`.** That is the guard proving it fails closed. Both fixes are in this task.
 
 **Files:**
-- Create: `src/modules/auth/decorators/public.decorator.ts`
+- Create: `src/common/decorators/public.decorator.ts`
 - Create: `src/modules/auth/guards/jwt-auth.guard.ts`
 - Modify: `src/modules/auth/auth.module.ts`, `src/modules/auth/auth.controller.ts`
 - Modify: `src/modules/health/health.controller.ts`
@@ -1856,7 +1858,7 @@ Expected: FAIL — `/api/v1/auth/me` returns 500 (no `request.user`) rather than
 
 - [ ] **Step 3: Create the `@Public()` decorator**
 
-Create `src/modules/auth/decorators/public.decorator.ts`:
+Create `src/common/decorators/public.decorator.ts`:
 
 ```ts
 import { CustomDecorator, SetMetadata } from '@nestjs/common';
@@ -1865,6 +1867,8 @@ export const IS_PUBLIC_KEY = 'isPublic';
 
 export const Public = (): CustomDecorator => SetMetadata(IS_PUBLIC_KEY, true);
 ```
+
+**Why `common/` and not `auth/`.** Steps 6 and 7 mark `/health` and the ping fixture `@Public()`. If this file lived in `src/modules/auth/decorators/`, `HealthModule` would be importing another module's internal file — forbidden by `CLAUDE.md` ("never by reaching into another module's internal files directly"). The decorator is pure `SetMetadata` with no auth dependencies, which is the definition of cross-cutting. The guard in Step 4 goes the other way: it injects `TokenService`, so putting *it* in `common/` would make the cross-cutting layer depend on a feature module — a worse inversion. See spec §8.
 
 - [ ] **Step 4: Implement the guard**
 
@@ -1879,7 +1883,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
-import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+import { IS_PUBLIC_KEY } from '../../../common/decorators/public.decorator';
 import { TokenService } from '../token.service';
 
 const BEARER_PREFIX = 'Bearer ';
@@ -1937,6 +1941,14 @@ In `src/app.module.ts`, add to `providers`:
 with `import { APP_GUARD } from '@nestjs/core';` and `import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';`. `useExisting` reuses the instance `AuthModule` already provides, so its dependencies resolve there.
 
 - [ ] **Step 6: Mark the public routes**
+
+All three call sites import from `common/`, not from `auth/`:
+
+| File | Import |
+|---|---|
+| `src/modules/auth/auth.controller.ts` | `import { Public } from '../../common/decorators/public.decorator';` |
+| `src/modules/health/health.controller.ts` | `import { Public } from '../../common/decorators/public.decorator';` |
+| `test/fixtures/ping.module.ts` | `import { Public } from '../../src/common/decorators/public.decorator';` |
 
 In `src/modules/auth/auth.controller.ts`, add `@Public()` to `register`, `login`, and `refresh`.
 
