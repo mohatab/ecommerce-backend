@@ -9,6 +9,11 @@ export interface AppConfig {
   cors: {
     origin: string;
   };
+  jwt: {
+    secret: string;
+    accessTtl: string;
+    refreshTtl: string;
+  };
 }
 
 export default (): AppConfig => ({
@@ -21,5 +26,10 @@ export default (): AppConfig => ({
   },
   cors: {
     origin: process.env.CORS_ORIGIN ?? '*',
+  },
+  jwt: {
+    secret: process.env.JWT_SECRET ?? '',
+    accessTtl: process.env.JWT_ACCESS_TTL ?? '15m',
+    refreshTtl: process.env.JWT_REFRESH_TTL ?? '7d',
   },
 });

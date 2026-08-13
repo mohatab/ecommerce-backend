@@ -63,6 +63,9 @@ jobs:
       # too so the app's Joi validation passes when the module boots.
       DATABASE_URL: postgresql://postgres:postgres@localhost:5433/ecommerce_test
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5433/ecommerce_test
+      # No .env exists in CI, so every Joi-required variable must be set here.
+      # A throwaway value: CI signs and verifies within a single run.
+      JWT_SECRET: ci-only-secret-not-used-outside-continuous-integration
 
     steps:
       - uses: actions/checkout@v5

@@ -13,6 +13,9 @@ interface ValidatedEnv {
   DATABASE_URL: string;
   CORS_ORIGIN: string;
   TEST_DATABASE_URL?: string;
+  JWT_SECRET: string;
+  JWT_ACCESS_TTL: string;
+  JWT_REFRESH_TTL: string;
 }
 
 function validate(env: Record<string, unknown>): {
@@ -30,6 +33,7 @@ function validEnv(
 ): Record<string, unknown> {
   return {
     DATABASE_URL: 'postgresql://postgres:postgres@localhost:5432/ecommerce_dev',
+    JWT_SECRET: 'x'.repeat(32),
     ...overrides,
   };
 }
@@ -70,6 +74,19 @@ describe('envValidationSchema', () => {
 
       expect(error).toBeUndefined();
     });
+
+    it('accepts a JWT_SECRET at exactly the floor', () => {
+      expect(
+        validate(validEnv({ JWT_SECRET: 'a'.repeat(32) })).error,
+      ).toBeUndefined();
+    });
+
+    it('defaults the token lifetimes', () => {
+      const { value } = validate(validEnv());
+
+      expect(value.JWT_ACCESS_TTL).toBe('15m');
+      expect(value.JWT_REFRESH_TTL).toBe('7d');
+    });
   });
 
   describe('failing fast on a broken environment', () => {
@@ -99,6 +116,19 @@ describe('envValidationSchema', () => {
       expect(rejectedKeys(validate(validEnv({ PORT: 'abc' })).error)).toContain(
         'PORT',
       );
+    });
+
+    it('rejects a missing JWT_SECRET', () => {
+      const env = validEnv();
+      delete env.JWT_SECRET;
+
+      expect(rejectedKeys(validate(env).error)).toContain('JWT_SECRET');
+    });
+
+    it('rejects a JWT_SECRET below the 32-character floor', () => {
+      const { error } = validate(validEnv({ JWT_SECRET: 'a'.repeat(31) }));
+
+      expect(rejectedKeys(error)).toContain('JWT_SECRET');
     });
 
     it('reports every problem at once rather than stopping at the first', () => {
