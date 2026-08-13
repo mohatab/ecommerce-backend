@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { PasswordHasherService } from './password-hasher.service';
 
@@ -35,6 +36,22 @@ describe('PasswordHasherService', () => {
     await expect(hasher.verify('not-a-digest', 'anything')).resolves.toBe(
       false,
     );
+  });
+
+  it('logs a warning on a malformed digest without leaking the plaintext password', async () => {
+    const warnSpy = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+
+    const plain = 'anything-super-secret';
+    await hasher.verify('not-a-digest', plain);
+
+    expect(warnSpy).toHaveBeenCalled();
+
+    const loggedText = warnSpy.mock.calls.flat().map(String).join(' ');
+    expect(loggedText).not.toContain(plain);
+
+    warnSpy.mockRestore();
   });
 
   it('produces different digests for the same password, both of which verify', async () => {
