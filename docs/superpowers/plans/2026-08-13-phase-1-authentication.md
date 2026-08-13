@@ -6,7 +6,7 @@
 
 **Architecture:** `UsersModule` owns the `User` model and exports `UsersService` with no controller. `AuthModule` owns `RefreshToken`, hashing, tokens, and the guard, and depends on `UsersService`. Auth logic is split across three focused services — `TokenService` (pure crypto/JWT, no database), `RefreshTokenService` (persistence, rotation, family revocation), and `AuthService` (orchestration) — so each is unit-testable in isolation. `JwtAuthGuard` is registered globally via `APP_GUARD` and fails closed; routes opt out with `@Public()`.
 
-**Tech Stack:** NestJS 11, Prisma 6.19.3, PostgreSQL 16, `@nestjs/jwt` 11.0.2, `@nestjs/throttler` 6.5.0, `@node-rs/argon2` 2.0.2, Jest 30 + Supertest, TypeScript 5.7 (strict).
+**Tech Stack:** NestJS 11, Prisma 6.19.3, PostgreSQL 16, `@nestjs/jwt` 11.0.2, `@nestjs/throttler` 6.5.0, `@node-rs/argon2` ^2.1.0, Jest 30 + Supertest, TypeScript 5.7 (strict).
 
 **Spec:** `docs/superpowers/specs/2026-08-13-phase-1-authentication-design.md`
 **Branch:** `phase-1/authentication`
