@@ -8,7 +8,12 @@ import {
   Req,
   UnauthorizedException,
 } from '@nestjs/common';
-import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import type { Request } from 'express';
 import { AuthService } from './auth.service';
 import { AuthResponseDto } from './dto/auth-response.dto';
@@ -17,6 +22,7 @@ import { RefreshDto } from './dto/refresh.dto';
 import { RegisterDto } from './dto/register.dto';
 import { UserResponseDto } from './dto/user-response.dto';
 import { UsersService } from '../users/users.service';
+import { Public } from '../../common/decorators/public.decorator';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -26,6 +32,7 @@ export class AuthController {
     private readonly usersService: UsersService,
   ) {}
 
+  @Public()
   @Post('register')
   @ApiOperation({ summary: 'Register a new account' })
   @ApiResponse({ status: 201, description: 'Account created' })
@@ -36,6 +43,7 @@ export class AuthController {
     );
   }
 
+  @Public()
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Exchange credentials for tokens' })
@@ -47,6 +55,7 @@ export class AuthController {
     );
   }
 
+  @Public()
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Rotate a refresh token' })
@@ -60,6 +69,7 @@ export class AuthController {
 
   @Post('logout')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiBearerAuth()
   @ApiOperation({ summary: 'Revoke every refresh token for the caller' })
   @ApiResponse({ status: 204, description: 'Logged out' })
   // request.user is guaranteed by the global JwtAuthGuard; these routes are
@@ -69,6 +79,7 @@ export class AuthController {
   }
 
   @Get('me')
+  @ApiBearerAuth()
   @ApiOperation({ summary: 'Return the authenticated principal' })
   @ApiResponse({ status: 200, description: 'The current user' })
   @ApiResponse({
@@ -82,7 +93,7 @@ export class AuthController {
     // wiped database) must read as unauthorized. Asserting non-null here
     // would throw a TypeError and surface as a 500.
     if (!user) {
-      throw new UnauthorizedException();
+      throw new UnauthorizedException('Unauthorized');
     }
 
     return UserResponseDto.from(user);

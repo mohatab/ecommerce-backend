@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { PrismaService } from '../../prisma/prisma.service';
+import { Public } from '../../common/decorators/public.decorator';
 
 interface HealthStatus {
   status: 'ok';
@@ -14,6 +15,7 @@ interface HealthStatus {
 }
 
 @ApiTags('health')
+@Public()
 @Controller({ path: 'health', version: VERSION_NEUTRAL })
 export class HealthController {
   private readonly logger = new Logger(HealthController.name);

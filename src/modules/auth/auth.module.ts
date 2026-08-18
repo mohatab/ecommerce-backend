@@ -5,6 +5,7 @@ import { AppConfig } from '../../config/configuration';
 import { UsersModule } from '../users/users.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { PasswordHasherService } from './password-hasher.service';
 import { RefreshTokenService } from './refresh-token.service';
 import { TokenService } from './token.service';
@@ -25,7 +26,8 @@ import { TokenService } from './token.service';
     PasswordHasherService,
     TokenService,
     RefreshTokenService,
+    JwtAuthGuard,
   ],
-  exports: [TokenService],
+  exports: [TokenService, JwtAuthGuard],
 })
 export class AuthModule {}
