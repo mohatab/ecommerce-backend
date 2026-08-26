@@ -6,6 +6,7 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
+import { ThrottlerException } from '@nestjs/throttler';
 import { Prisma } from '@prisma/client';
 import { Request, Response } from 'express';
 
@@ -77,6 +78,21 @@ export class HttpExceptionFilter implements ExceptionFilter {
     message: string | string[];
     error: string;
   } {
+    // ThrottlerException extends HttpException with a bare string response
+    // ('ThrottlerException: Too Many Requests'), which would otherwise fall
+    // through to the generic string branch below and surface both `error`
+    // and `message` as the raw library string — a class-name-bearing
+    // internal detail, not the canonical reason phrase every other error in
+    // this API uses. Both fields are hardcoded here rather than derived from
+    // the exception.
+    if (exception instanceof ThrottlerException) {
+      return {
+        statusCode: exception.getStatus(),
+        message: 'Too Many Requests',
+        error: 'Too Many Requests',
+      };
+    }
+
     if (exception instanceof HttpException) {
       const status = exception.getStatus();
       const response = exception.getResponse();

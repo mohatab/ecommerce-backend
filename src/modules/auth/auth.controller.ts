@@ -14,6 +14,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { AuthService } from './auth.service';
 import { AuthResponseDto } from './dto/auth-response.dto';
@@ -33,6 +34,10 @@ export class AuthController {
   ) {}
 
   @Public()
+  // Overrides the default throttler for this route only. The key must be
+  // `default` — that is the name ThrottlerModule.forRoot assigns when no
+  // explicit name is given.
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @Post('register')
   @ApiOperation({ summary: 'Register a new account' })
   @ApiResponse({ status: 201, description: 'Account created' })
@@ -44,6 +49,10 @@ export class AuthController {
   }
 
   @Public()
+  // Overrides the default throttler for this route only. The key must be
+  // `default` — that is the name ThrottlerModule.forRoot assigns when no
+  // explicit name is given.
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Exchange credentials for tokens' })
@@ -56,6 +65,10 @@ export class AuthController {
   }
 
   @Public()
+  // Overrides the default throttler for this route only. The key must be
+  // `default` — that is the name ThrottlerModule.forRoot assigns when no
+  // explicit name is given.
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Rotate a refresh token' })
