@@ -1,6 +1,7 @@
 import { Controller, Get, Module, Query } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { IsInt, Min } from 'class-validator';
+import { Public } from '../../src/common/decorators/public.decorator';
 
 export class EchoQueryDto {
   @Type(() => Number)
@@ -9,6 +10,7 @@ export class EchoQueryDto {
   limit!: number;
 }
 
+@Public()
 @Controller('ping')
 export class PingController {
   @Get()

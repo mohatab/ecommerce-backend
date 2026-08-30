@@ -77,11 +77,55 @@ For a short interval after rotation, the previous token still resolves to its su
 
 Take a lock so refreshes for one user cannot interleave — `SELECT … FOR UPDATE` on the token row, or `pg_advisory_xact_lock` keyed on user id.
 
-**This is not a third option; it is orthogonal.** Serialization makes the race *deterministic* — it does not decide what the loser receives. After the lock, the second request still presents a consumed token, and the server still needs (a)'s or (b)'s semantics to answer it. Locking alone changes nothing observable.
+> **Corrected after the Phase 1 final review.** The original text of this
+> section argued that serialization was purely orthogonal — that "locking alone
+> changes nothing observable" — and rejected it on that basis. **That reasoning
+> was wrong**, and it is corrected below rather than deleted, because the
+> original error is the kind a future phase would otherwise repeat.
 
-**Does our setup support it?** Yes. Row locks and advisory locks are core Postgres and need no Redis, so it is compatible with the "no Redis until Phase 5" constraint. Contention is per-user, not global, so throughput impact on a realistic auth workload is negligible. The cost is complexity: a transaction boundary around the refresh path, and a lock that must not leak across the JWT signing call.
+**The claim that was wrong.** The earlier argument ran: after a lock, the loser
+still presents a consumed token, so the server still needs (a)'s or (b)'s
+semantics to answer it, and therefore locking changes nothing observable.
 
-**Verdict: rejected for Phase 1** — real complexity for a race this client cannot generate. Worth revisiting only alongside (b), and only if a browser client arrives.
+The second half does not follow. **Without atomicity the loser never presents a
+consumed token at all** — it presents one it already read as *unconsumed*. Under
+a plain `findUnique` → check `revokedAt` → `update` sequence, both requests read
+`revokedAt: null`, both pass the check, and both rotate. The result is two live
+siblings in one family and **the reuse detection never fires**: the token was
+consumed twice without ever being observed as consumed. So the difference is
+observable, and it is precisely the difference between approach (a) working and
+approach (a) being silently bypassed.
+
+This was confirmed empirically against Postgres during the final review: under
+the old pattern, two concurrent consumes of the same row both reported success.
+
+**What the original text missed: the option between "nothing" and "a lock".**
+It weighed only `SELECT … FOR UPDATE` and `pg_advisory_xact_lock`, and rejected
+both on complexity — a transaction boundary around the refresh path, and a lock
+that must not leak across the JWT signing call. Those objections are fair, and
+they still stand. But there is a cheaper point in the space: make the *consume*
+step a compare-and-swap, carrying the predicate in the write itself.
+
+```
+UPDATE refresh_tokens SET revoked_at = now()
+ WHERE id = $1 AND revoked_at IS NULL      -- 1 row, or 0 if someone else won
+```
+
+`count === 1` means this request consumed the token. `count === 0` means a
+concurrent request consumed it first — which on the wire is indistinguishable
+from a replayed steal, so it takes the same answer the `revokedAt` branch gives:
+revoke the family, return the uniform 401. Postgres serialises the two
+statements on the row, so exactly one can match.
+
+**Cost:** one statement. No transaction, no explicit lock, nothing held across
+JWT signing, no Redis, no new dependency. The complexity objection that defeats
+(c) does not apply to it.
+
+**Verdict: adopted for Phase 1.** Row-level and advisory locking remain
+**rejected** — genuine complexity for a race this client shape cannot generate.
+But atomicity at the write boundary is not the same thing as locking, and it is
+what makes approach (a)'s guarantee true as stated rather than true only when
+requests happen not to overlap.
 
 ### 3.5 Recommendation, and what is being traded away
 
@@ -426,3 +470,37 @@ Any of those changing turns a green build into a release command that fails at d
 3. Add a CI step that **runs** the built image and probes `/health`. The `docker` job currently builds and discards, so nothing proves the deploy unit boots.
 
 Item 3 is the durable fix. This section had to be corrected once already because the image had never been executed anywhere — the original text asserted the CLI was missing, which one `docker run` disproved. Build-only CI produces exactly that class of confident, wrong claim.
+
+---
+
+## 15. Token crypto: algorithm, payload, and failure handling
+
+Task 6 (`TokenService`) left three things implicit rather than decided: the signing algorithm, the exact payload, and what a verification failure looks like to callers. None of these are deviations from the foundation spec — it does not specify them — so this section fills a gap rather than overriding a prior decision, the same relationship §5 has to foundation spec §7.
+
+### 15.1 Signing algorithm: HS256
+
+Symmetric, one shared `JWT_SECRET`. This is not a new decision so much as making explicit what `JwtModule.register({ secret })` already implies by library default — but it is worth stating, because the alternative is a real design, not a formality.
+
+**Rejected: RS256/ES256 (asymmetric).** The argument for a keypair is letting a party other than the signer verify tokens without holding the signing secret — typically because a separate service or gateway needs to validate tokens independently. Nothing in the roadmap through Phase 6 describes that: this is a single deployed service with managed Postgres and Redis, not a service mesh. Asymmetric signing would add key generation, PEM storage, and a rotation story for a capability nothing here uses. `HS256` matches the configuration Task 1 already built — one secret, no keypair.
+
+### 15.2 Access token payload: `{ sub, role }`
+
+The original Task 6 draft carried `{ sub, email, role }`. `email` is removed.
+
+**This was verified, not assumed.** Every consumer of `AuthenticatedUser`/`request.user` in the implementation plan was checked by direct search: `AuthService.logout` and `AuthController.me` both read only `.sub`; nothing reads `.email` off the token anywhere. `GET /auth/me` (Task 9) returns the user's email by refetching the full row from the database via `usersService.findById(request.user.sub)` — the JWT's copy is never consulted. `UserResponseDto` and `AuthResponseDto` populate `email` from that same database row, not from the token, so this change has no effect on any response body.
+
+**Why remove a claim nothing reads:** a bearer token is not confined to the application's own logs. It routinely surfaces in places `CLAUDE.md`'s "never log tokens" rule cannot reach — proxy and CDN access logs, browser devtools network history, error-tracker request breadcrumbs. Every claim in the payload is PII carried into all of those places by construction. An unused claim is pure downside: no functionality depends on it, and removing it shrinks that surface for free. Re-adding it later, if a real consumer appears, costs nothing beyond editing one object literal — JWTs are not a persisted schema, and no migration or backfill is involved. Tokens already in flight without the claim simply expire within 15 minutes.
+
+**`role` is kept, and this is not the same argument in reverse.** `role` is also unread by any Phase 1 code today, but unlike `email` it has a concrete, already-documented near-term consumer: Phase 2's `RolesGuard` (named in §7 and the Phase 2 blocker note) will read `request.user.role` to authorize routes without a Prisma lookup on every request — the standard reason an authorization claim belongs in the token at all. Keeping `role` is provisioning for a documented next phase; keeping `email` would have been provisioning for nothing on record.
+
+### 15.3 Verification failures propagate unwrapped
+
+`TokenService.verifyAccessToken` does not catch or rewrap the underlying `@nestjs/jwt` error. It throws whatever the library throws.
+
+**This was checked against the actual consumer, not decided in isolation.** Task 10's `JwtAuthGuard` was read before this call: it wraps every call to `verifyAccessToken` in a bare `try { … } catch { throw new UnauthorizedException(); }`, with a comment stating the intent directly — expired, tampered, and wrong-secret tokens are all just "unauthorized." The guard does not branch on error type. A `TokenService`-owned exception (e.g. `InvalidTokenError`) would have exactly one caller, and that caller already discards everything the wrapper would carry. Building it now is provisioning for a distinction nothing in this phase draws — the same category of speculative generality §7 and §8 already reject elsewhere in this document.
+
+**The plan's original test was still too weak to keep as written.** `rejects.toBeDefined()` passes even if the method rejected with a bare string rather than an `Error`. Tightened to `rejects.toBeInstanceOf(Error)` — a one-line change that costs nothing and catches a real code smell (throwing a non-`Error` value) that the previous assertion could not.
+
+### 15.4 Confirmed unchanged
+
+Access token lifetime (15 minutes, §6), refresh token generation (`randomBytes(32)` via `node:crypto`, a CSPRNG, base64url-encoded — §4.2), and refresh token hashing (SHA-256, §4.2) were all re-examined against this section's questions and found already correctly decided with rationale on record. `TokenService`'s no-Prisma boundary — it accepts an already-fetched `User` and never imports `PrismaService` — was likewise confirmed as already correct in the Task 6 draft. Nothing in this section changes any of the four.

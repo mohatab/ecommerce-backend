@@ -6,7 +6,7 @@
 
 **Architecture:** `UsersModule` owns the `User` model and exports `UsersService` with no controller. `AuthModule` owns `RefreshToken`, hashing, tokens, and the guard, and depends on `UsersService`. Auth logic is split across three focused services — `TokenService` (pure crypto/JWT, no database), `RefreshTokenService` (persistence, rotation, family revocation), and `AuthService` (orchestration) — so each is unit-testable in isolation. `JwtAuthGuard` is registered globally via `APP_GUARD` and fails closed; routes opt out with `@Public()`.
 
-**Tech Stack:** NestJS 11, Prisma 6.19.3, PostgreSQL 16, `@nestjs/jwt` 11.0.2, `@nestjs/throttler` 6.5.0, `@node-rs/argon2` 2.0.2, Jest 30 + Supertest, TypeScript 5.7 (strict).
+**Tech Stack:** NestJS 11, Prisma 6.19.3, PostgreSQL 16, `@nestjs/jwt` 11.0.2, `@nestjs/throttler` 6.5.0, `@node-rs/argon2` ^2.1.0, Jest 30 + Supertest, TypeScript 5.7 (strict).
 
 **Spec:** `docs/superpowers/specs/2026-08-13-phase-1-authentication-design.md`
 **Branch:** `phase-1/authentication`
@@ -83,6 +83,7 @@ Goes first so every later task can read `jwt.*` from `ConfigService` instead of 
 - Modify: `src/config/env.validation.ts`
 - Modify: `src/config/configuration.ts`
 - Modify: `.github/workflows/ci.yml`
+- Modify: `src/config/env.validation.spec.ts` (already exists — extend with the JWT rules, Step 4)
 - Test: `src/config/configuration.spec.ts` (create)
 
 **Interfaces:**
@@ -187,6 +188,36 @@ In `src/config/env.validation.ts`, add to the schema object:
 
 `min(32)` makes a weak secret abort boot rather than silently producing forgeable tokens.
 
+**Extend `src/config/env.validation.spec.ts` in the same commit.** That suite already exists and covers the pre-Phase-1 schema; the three JWT rules are the first with real security weight, so they do not ship untested. Add `JWT_SECRET` to the `validEnv()` helper — it is the one place the minimal-valid environment is defined, so every existing test keeps passing — then add:
+
+```ts
+    it('rejects a missing JWT_SECRET', () => {
+      const env = validEnv();
+      delete env.JWT_SECRET;
+
+      expect(rejectedKeys(validate(env).error)).toContain('JWT_SECRET');
+    });
+
+    it('rejects a JWT_SECRET below the 32-character floor', () => {
+      const { error } = validate(validEnv({ JWT_SECRET: 'a'.repeat(31) }));
+
+      expect(rejectedKeys(error)).toContain('JWT_SECRET');
+    });
+
+    it('accepts a JWT_SECRET at exactly the floor', () => {
+      expect(validate(validEnv({ JWT_SECRET: 'a'.repeat(32) })).error).toBeUndefined();
+    });
+
+    it('defaults the token lifetimes', () => {
+      const { value } = validate(validEnv());
+
+      expect(value.JWT_ACCESS_TTL).toBe('15m');
+      expect(value.JWT_REFRESH_TTL).toBe('7d');
+    });
+```
+
+Add `JWT_SECRET: string; JWT_ACCESS_TTL: string; JWT_REFRESH_TTL: string;` to the `ValidatedEnv` interface. Run `npm test -- env.validation` before and after the Joi change: the two rejection tests must fail first, or they are not testing the rule you just wrote.
+
 - [ ] **Step 5: Document the vars**
 
 Append to `.env.example`:
@@ -234,8 +265,9 @@ Expected: all pass. E2E now requires `JWT_SECRET` in `.env` — if it is missing
 - [ ] **Step 9: Commit**
 
 ```bash
-git add .env.example src/config/env.validation.ts src/config/configuration.ts \
-        src/config/configuration.spec.ts .github/workflows/ci.yml
+git add .env.example src/config/env.validation.ts src/config/env.validation.spec.ts \
+        src/config/configuration.ts src/config/configuration.spec.ts \
+        .github/workflows/ci.yml
 git commit -m "feat: add JWT configuration with Joi validation"
 ```
 
@@ -726,6 +758,8 @@ git commit -m "feat: add users module with service-only scope"
 
 No database access, so it is fully unit-testable without mocking Prisma.
 
+**Algorithm: HS256.** `JwtModule.register({ secret: SECRET })` below signs and verifies with the single shared `JWT_SECRET` from Task 1 — this is HS256 by library default with a string secret, made explicit here rather than left implicit. No keypair; see spec §15.1 for why asymmetric signing isn't warranted in a single-service deployment.
+
 **Files:**
 - Create: `src/modules/auth/token.service.ts`
 - Create: `src/modules/auth/types/authenticated-user.ts`
@@ -734,7 +768,7 @@ No database access, so it is fully unit-testable without mocking Prisma.
 
 **Interfaces:**
 - Produces:
-  - `AuthenticatedUser` — `{ sub: string; email: string; role: Role }`
+  - `AuthenticatedUser` — `{ sub: string; role: Role }` (no `email` — see spec §15.2: nothing in this plan reads it off the token, `/auth/me` refetches from the database)
   - `TokenService.signAccessToken(user: User): Promise<string>`
   - `TokenService.verifyAccessToken(token: string): Promise<AuthenticatedUser>`
   - `TokenService.generateRefreshToken(): string` — 32 random bytes, base64url
@@ -751,12 +785,13 @@ npm install @nestjs/jwt
 
 Create `src/modules/auth/types/authenticated-user.ts`. The Express augmentation is what lets `request.user` typecheck under `strict`.
 
+**No `email` field.** Nothing in this plan reads `request.user.email` or `payload.email` — `AuthService.logout` and `AuthController.me` both key off `.sub` only, and `/auth/me` returns email by refetching the user row from the database, not from the token. `role` stays: Phase 2's `RolesGuard` reads it directly, per spec §15.2.
+
 ```ts
 import { Role } from '@prisma/client';
 
 export interface AuthenticatedUser {
   sub: string;
-  email: string;
   role: Role;
 }
 
@@ -806,17 +841,22 @@ describe('TokenService', () => {
     service = module.get<TokenService>(TokenService);
   });
 
-  it('signs an access token carrying id, email and role', async () => {
+  it('signs an access token carrying the user id and role', async () => {
     const token = await service.signAccessToken(user);
     const payload = await service.verifyAccessToken(token);
 
     expect(payload.sub).toBe('user-1');
-    expect(payload.email).toBe('a@example.test');
     expect(payload.role).toBe(Role.CUSTOMER);
   });
 
   it('rejects a malformed token', async () => {
-    await expect(service.verifyAccessToken('not.a.token')).rejects.toBeDefined();
+    // toBeInstanceOf(Error), not toBeDefined() — the latter would pass even if
+    // the underlying library rejected with a bare string. verifyAccessToken
+    // does not catch or rewrap this; JwtAuthGuard (Task 10) already collapses
+    // every failure shape to a generic 401 (spec §15.3).
+    await expect(service.verifyAccessToken('not.a.token')).rejects.toBeInstanceOf(
+      Error,
+    );
   });
 
   it('generates unique high-entropy refresh tokens', () => {
@@ -878,7 +918,6 @@ export class TokenService {
   async signAccessToken(user: User): Promise<string> {
     const payload: AuthenticatedUser = {
       sub: user.id,
-      email: user.email,
       role: user.role,
     };
 
@@ -1217,6 +1256,15 @@ git commit -m "feat: add refresh token rotation with reuse detection"
 **Interfaces:**
 - Consumes: `UsersService` (Task 5), `PasswordHasherService` (Task 3), `TokenService` (Task 6), `RefreshTokenService` (Task 7).
 - Produces: `AuthService.register(email, password)`, `.login(email, password)`, `.refresh(token)`, `.logout(userId)`. The first three resolve to `{ accessToken: string; refreshToken: string; user: User }`.
+- Also implements `OnModuleInit` — see the timing defence below.
+
+**The timing defence, and where its dummy digest comes from.** When the email is unknown there is no stored digest to verify against, so `login` verifies against a throwaway one instead; without it, "user not found" returns measurably faster than "wrong password" and login becomes an email-enumeration oracle.
+
+That dummy digest is **derived at initialisation, not hardcoded.** `onModuleInit` hashes `randomBytes(32).toString('hex')` through the same `PasswordHasherService` that hashes real passwords. This matters for a non-obvious reason: **argon2 reads its cost parameters (`m`, `t`, `p`) from the digest it is verifying**, not from any global setting. A constant generated against different parameters than the live hasher produces would make the unknown-email path measurably cheaper than the wrong-password path — reopening the oracle silently, with every functional test still green. Deriving through the hasher makes that drift impossible by construction, and leaves no placeholder anyone can forget to replace.
+
+The plaintext is discarded the moment it is hashed: never stored, returned, or logged. Nothing can authenticate against it — a caller who somehow guessed it would still fail the `!user` branch.
+
+**The other half of the defence is ordering:** `verify` must be awaited *above* the user-existence branch, unconditionally. Short-circuiting on a missing user restores the oracle, and no functional test would catch it because the responses stay identical.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1241,10 +1289,20 @@ const user: User = {
   updatedAt: new Date(),
 };
 
+/**
+ * The digest onModuleInit derives, distinct from every other mocked hash so
+ * the timing-defence test can prove login verified against *that* value
+ * rather than against some incidental string.
+ */
+const BOOT_DIGEST = 'boot-derived-dummy-digest';
+
 describe('AuthService', () => {
   let service: AuthService;
   let users: { findByEmail: jest.Mock; findById: jest.Mock; create: jest.Mock };
-  let hasher: { hash: jest.Mock; verify: jest.Mock };
+  let hasher: {
+    hash: jest.Mock<Promise<string>, [string]>;
+    verify: jest.Mock<Promise<boolean>, [string, string]>;
+  };
   let tokens: { signAccessToken: jest.Mock };
   let refreshTokens: {
     issue: jest.Mock;
@@ -1321,14 +1379,17 @@ describe('AuthService', () => {
     );
   });
 
-  it('still verifies a password when the user does not exist', async () => {
+  it('verifies against the boot-derived dummy digest when the user does not exist', async () => {
     users.findByEmail.mockResolvedValueOnce(null);
 
     await service.login('nobody@example.test', 'Test1234!').catch(() => null);
 
-    // Without this, "user not found" returns measurably faster than
-    // "wrong password", turning login into an email-enumeration oracle.
-    expect(hasher.verify).toHaveBeenCalled();
+    // Assert the exact operand, not merely that verify() was called: a
+    // hardcoded placeholder would satisfy "was called" while doing no argon2
+    // work at all. BOOT_DIGEST is queued with mockResolvedValueOnce for the
+    // onModuleInit hash only, so this proves login verified against the
+    // derived value specifically.
+    expect(hasher.verify).toHaveBeenCalledWith(BOOT_DIGEST, 'Test1234!');
   });
 
   it('issues a new pair on refresh', async () => {
@@ -1344,6 +1405,33 @@ describe('AuthService', () => {
     expect(result.accessToken).toBe('access-token');
   });
 
+  it('rejects a refresh whose token rotates to a user that no longer exists', async () => {
+    refreshTokens.rotate.mockResolvedValueOnce({
+      userId: 'ghost',
+      token: 'next-refresh',
+    });
+    users.findById.mockResolvedValueOnce(null);
+
+    // Near-unreachable in production because onDelete: Cascade removes a
+    // user's tokens with the user, so rotate() would reject first. That is
+    // exactly why it needs a unit test: e2e cannot construct the state.
+    await expect(service.refresh('presented')).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+  });
+
+  it('derives the dummy digest from 32 random bytes at initialisation', () => {
+    expect(hasher.hash).toHaveBeenCalledWith(
+      expect.stringMatching(/^[0-9a-f]{64}$/),
+    );
+  });
+
+  it('derives a fresh dummy password on every initialisation', async () => {
+    await service.onModuleInit();
+
+    expect(hasher.hash.mock.calls[0][0]).not.toBe(hasher.hash.mock.calls[1][0]);
+  });
+
   it('revokes every token for the user on logout', async () => {
     await service.logout('user-1');
 
@@ -1351,6 +1439,30 @@ describe('AuthService', () => {
   });
 });
 ```
+
+`beforeEach` must queue the boot digest and run the lifecycle hook before any test touches `login`:
+
+```ts
+    hasher.hash.mockResolvedValueOnce(BOOT_DIGEST);
+    await service.onModuleInit();
+```
+
+Type the hasher mocks (`jest.Mock<Promise<string>, [string]>`, `jest.Mock<Promise<boolean>, [string, string]>`) rather than bare `jest.Mock`, or `mock.calls[0][0]` resolves to `any` and `lint:ci` fails on `no-unsafe-member-access`.
+
+**A second `describe` runs the real hasher.** The mocked block cannot prove the digest is a genuine argon2id encoding — the mock returns a string. Add a block providing the real `PasswordHasherService`, spy on `verify`, and read the operand login actually used (not a private field):
+
+```ts
+    await service.login('nobody@example.test', 'irrelevant').catch(() => null);
+    const dummy = verifySpy.mock.calls[0][0];
+
+    expect(dummy).toMatch(/^\$argon2id\$v=19\$m=\d+,t=\d+,p=\d+\$/);
+    // Same cost parameters as a real user digest, or the timing defence is
+    // cheaper on the unknown-email path than the wrong-password path.
+    const params = (d: string) => d.split('$').slice(0, 4).join('$');
+    expect(params(dummy)).toBe(params(await hasher.hash('a-real-password')));
+```
+
+**No wall-clock assertions anywhere.** These tests assert digest identity and shape, never elapsed time — timing measurements are flaky under CI load and prove less than pinning the operand.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -1365,8 +1477,13 @@ Expected: FAIL — `Cannot find module './auth.service'`.
 Create `src/modules/auth/auth.service.ts`.
 
 ```ts
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  OnModuleInit,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { User } from '@prisma/client';
+import { randomBytes } from 'node:crypto';
 import { UsersService } from '../users/users.service';
 import { PasswordHasherService } from './password-hasher.service';
 import { RefreshTokenService } from './refresh-token.service';
@@ -1379,16 +1496,27 @@ export interface AuthResult {
 }
 
 const INVALID_CREDENTIALS = 'Invalid email or password';
-
-/**
- * A valid argon2id digest of a value nobody knows. Verified against when the
- * email is unknown so that a missing user costs the same time as a wrong
- * password.
- */
-const DUMMY_DIGEST = '$argon2id$REPLACE_ME_IN_STEP_4';
+const INVALID_REFRESH_TOKEN = 'Invalid refresh token';
+const DUMMY_PASSWORD_BYTES = 32;
 
 @Injectable()
-export class AuthService {
+export class AuthService implements OnModuleInit {
+  /**
+   * An argon2id digest of a random value that is discarded the moment it is
+   * hashed. Verified against when the email is unknown, so a missing user
+   * costs the same time as a wrong password.
+   *
+   * Derived at boot through PasswordHasherService rather than hardcoded, so it
+   * always carries the same argon2 parameters as real user digests — argon2
+   * reads its cost from the digest it is verifying, so a constant generated
+   * against different parameters would silently make this path cheaper than
+   * the wrong-password path and reopen the timing oracle.
+   *
+   * Definite assignment is safe: Nest awaits onModuleInit before the
+   * application accepts requests.
+   */
+  private dummyDigest!: string;
+
   constructor(
     private readonly usersService: UsersService,
     private readonly passwordHasher: PasswordHasherService,
@@ -1396,9 +1524,19 @@ export class AuthService {
     private readonly refreshTokenService: RefreshTokenService,
   ) {}
 
+  async onModuleInit(): Promise<void> {
+    // The plaintext is never stored, returned, or logged — it exists only for
+    // the duration of this call, and nothing can authenticate against it.
+    this.dummyDigest = await this.passwordHasher.hash(
+      randomBytes(DUMMY_PASSWORD_BYTES).toString('hex'),
+    );
+  }
+
   async register(email: string, password: string): Promise<AuthResult> {
     const passwordHash = await this.passwordHasher.hash(password);
     // A duplicate email raises P2002, which HttpExceptionFilter maps to 409.
+    // No `role` is passed, and CreateUserInput has no field for one, so
+    // registration can only ever produce the schema default of CUSTOMER.
     const user = await this.usersService.create({ email, passwordHash });
 
     return this.issueFor(user);
@@ -1406,8 +1544,14 @@ export class AuthService {
 
   async login(email: string, password: string): Promise<AuthResult> {
     const user = await this.usersService.findByEmail(email);
+
+    // This must stay ABOVE the user-existence branch. Verifying
+    // unconditionally is what makes an unknown email cost the same argon2 work
+    // as a wrong password. Moving it below `if (!user)` — or short-circuiting
+    // on a missing user — turns login into an email-enumeration oracle, and no
+    // functional test would notice because the responses stay identical.
     const matches = await this.passwordHasher.verify(
-      user?.passwordHash ?? DUMMY_DIGEST,
+      user?.passwordHash ?? this.dummyDigest,
       password,
     );
 
@@ -1423,7 +1567,7 @@ export class AuthService {
     const user = await this.usersService.findById(userId);
 
     if (!user) {
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException(INVALID_REFRESH_TOKEN);
     }
 
     return {
@@ -1447,33 +1591,39 @@ export class AuthService {
 }
 ```
 
-- [ ] **Step 4: Replace the dummy digest with a real one**
-
-`$argon2id$REPLACE_ME_IN_STEP_4` is not a valid digest. Left in place, `verify` throws, the hasher catches it and returns `false` early — so login still *behaves* correctly and **every test still passes**, while the timing defence silently does nothing. This is the one step in the plan whose omission is invisible. Do not skip it.
-
-Generate a digest of a random value nobody knows, and paste it in:
-
-```bash
-node -e "require('@node-rs/argon2').hash(require('node:crypto').randomBytes(32).toString('hex')).then(console.log)"
-```
-
-Confirm the constant now starts with `$argon2id$v=19$` and contains no `REPLACE_ME`.
-
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
 npm test -- auth.service
 ```
 
-Expected: PASS, 6 tests.
+Expected: PASS, 12 tests.
+
+- [ ] **Step 5: Mutation-check the timing defence — this is not optional**
+
+A module-not-found red (Step 2) proves nothing about individual assertions, and the timing tests are the ones most able to pass for the wrong reason. Prove they bite before trusting them.
+
+Overwrite the derived digest with an invalid placeholder, immediately after deriving it:
+
+```ts
+    this.dummyDigest = '$argon2id$REPLACE_ME'; // TEMPORARY MUTATION
+```
+
+Overwriting rather than deleting keeps every symbol used, so nothing fails for an unrelated compile reason, and it isolates the property under test: *the digest login actually verifies against*.
+
+Expected: **3 failures** — `verifies against the boot-derived dummy digest…`, plus both real-hasher tests. The two initialisation tests keep passing, which is the point: asserting the hasher was *called* does not prove its output is what gets used.
+
+Revert, confirm no `REPLACE_ME`/`MUTATION` survives, and re-run to green.
 
 - [ ] **Step 6: Full verification and commit**
 
 ```bash
-npm run lint && npm run build && npm test
+npm run lint:ci && npm run build && npm test
 git add src/modules/auth/auth.service.ts src/modules/auth/auth.service.spec.ts
 git commit -m "feat: add auth service with register, login, refresh and logout"
 ```
+
+`lint:ci` rather than `lint`, so a formatting or type-safety failure is reported instead of silently auto-fixed. `test:e2e` is not required: `AuthModule` does not exist yet, so nothing here is reachable from a booted app.
 
 ---
 

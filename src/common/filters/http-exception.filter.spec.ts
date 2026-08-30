@@ -1,4 +1,5 @@
 import { ArgumentsHost, BadRequestException, HttpStatus } from '@nestjs/common';
+import { ThrottlerException } from '@nestjs/throttler';
 import { Prisma } from '@prisma/client';
 import { HttpExceptionFilter } from './http-exception.filter';
 
@@ -109,6 +110,26 @@ describe('HttpExceptionFilter', () => {
     filter.catch(new BadRequestException('bad input'), host);
 
     expect(captured.status).toHaveBeenCalledWith(HttpStatus.BAD_REQUEST);
+  });
+
+  it('maps ThrottlerException to a 429 with the canonical reason phrase', () => {
+    const { host, captured } = createHost();
+
+    filter.catch(new ThrottlerException(), host);
+
+    expect(captured.status).toHaveBeenCalledWith(HttpStatus.TOO_MANY_REQUESTS);
+    expect(captured.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        message: 'Too Many Requests',
+        error: 'Too Many Requests',
+      }),
+    );
+
+    const body =
+      captured.json.mock.calls[captured.json.mock.calls.length - 1][0];
+    expect(body.error).not.toBe('ThrottlerException');
+    expect(body.message).not.toContain('ThrottlerException');
   });
 
   it('includes the request path and a timestamp', () => {
