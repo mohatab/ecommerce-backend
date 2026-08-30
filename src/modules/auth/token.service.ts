@@ -8,6 +8,9 @@ import { AuthenticatedUser } from './types/authenticated-user';
 
 const REFRESH_TOKEN_BYTES = 32;
 
+/** Signing is left at the library default, which is this same algorithm. */
+const ACCESS_TOKEN_ALGORITHM = 'HS256';
+
 @Injectable()
 export class TokenService {
   constructor(
@@ -27,7 +30,15 @@ export class TokenService {
   }
 
   async verifyAccessToken(token: string): Promise<AuthenticatedUser> {
-    return this.jwtService.verifyAsync<AuthenticatedUser>(token);
+    // Pinned explicitly rather than left to jsonwebtoken's inference. With a
+    // string secret it would otherwise accept any of HS256/384/512, so the
+    // token's own `alg` header gets a say in how it is verified — and a
+    // verifier that reads its algorithm from the attacker-supplied half of
+    // the token is the shape every JWT algorithm-confusion bug takes.
+    // Defence-in-depth today, since this service is the only issuer.
+    return this.jwtService.verifyAsync<AuthenticatedUser>(token, {
+      algorithms: [ACCESS_TOKEN_ALGORITHM],
+    });
   }
 
   /**

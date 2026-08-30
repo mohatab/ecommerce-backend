@@ -26,6 +26,43 @@ describe('global auth guard (e2e)', () => {
       .expect(401);
   });
 
+  it('rejects "Bearer " carrying an empty token', async () => {
+    // The guard's own prefix check passes here — the header does start with
+    // "Bearer " — so rejection has to come from verifying the empty string
+    // that follows. Nothing pinned this before, and it is the one input that
+    // gets past the cheap check with nothing behind it.
+    await request(app.getHttpServer())
+      .get('/api/v1/auth/me')
+      .set('Authorization', 'Bearer ')
+      .expect(401);
+  });
+
+  it('rejects a lowercase "bearer" scheme, which is deliberate', async () => {
+    // JwtAuthGuard documents this case-sensitivity as a considered choice
+    // (RFC 7235 permits any case; no real client varies it). A choice with no
+    // test is only a comment: refactoring the prefix check to
+    // `.toLowerCase()` or `.split(' ')[1]` would pass every other test here.
+    const email = `case-${randomUUID()}@example.test`;
+
+    const registered = await request(app.getHttpServer())
+      .post('/api/v1/auth/register')
+      .send({ email, password: 'Test1234!' })
+      .expect(201);
+
+    const { accessToken } = registered.body as { accessToken: string };
+
+    // Same token, same everything — only the scheme's case differs.
+    await request(app.getHttpServer())
+      .get('/api/v1/auth/me')
+      .set('Authorization', `bearer ${accessToken}`)
+      .expect(401);
+
+    await request(app.getHttpServer())
+      .get('/api/v1/auth/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+  });
+
   it('returns the standard error shape on 401', async () => {
     const response = await request(app.getHttpServer())
       .get('/api/v1/auth/me')

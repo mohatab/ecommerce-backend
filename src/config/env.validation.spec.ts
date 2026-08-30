@@ -142,6 +142,41 @@ describe('envValidationSchema', () => {
     });
   });
 
+  describe('JWT TTL format', () => {
+    // Before this validation existed, `JWT_REFRESH_TTL="fifteen"` passed Joi,
+    // booted a clean-looking app, and then threw out of
+    // TokenService.parseDurationMs on the first register or login — a config
+    // typo surfacing as a 500 at runtime instead of at boot.
+    const ttlVars = ['JWT_ACCESS_TTL', 'JWT_REFRESH_TTL'] as const;
+
+    describe.each(ttlVars)('%s', (variable) => {
+      it.each(['15m', '7d', '3600s', '24h', '1m'])(
+        'accepts %s',
+        (value: string) => {
+          const { error } = validate(validEnv({ [variable]: value }));
+
+          expect(error).toBeUndefined();
+        },
+      );
+
+      it.each(['fifteen', '15 minutes', '1x', '', 'm15', '15', '1.5h', '-5m'])(
+        'rejects %p',
+        (value: string) => {
+          const { error } = validate(validEnv({ [variable]: value }));
+
+          expect(rejectedKeys(error)).toContain(variable);
+        },
+      );
+    });
+
+    it('keeps the documented defaults when unset', () => {
+      const { value } = validate(validEnv());
+
+      expect(value.JWT_ACCESS_TTL).toBe('15m');
+      expect(value.JWT_REFRESH_TTL).toBe('7d');
+    });
+  });
+
   describe('TEST_DATABASE_URL', () => {
     it('is optional, so production boots without it', () => {
       expect(validate(validEnv()).error).toBeUndefined();

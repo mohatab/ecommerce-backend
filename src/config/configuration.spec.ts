@@ -33,4 +33,26 @@ describe('configuration', () => {
     expect(config.jwt.accessTtl).toBe('15m');
     expect(config.jwt.refreshTtl).toBe('7d');
   });
+
+  // The factory used to return `secret: ''` here. Joi makes that unreachable
+  // on the boot path, but the fallback only ever mattered on the paths Joi
+  // does not run — and an empty HMAC key signs and verifies without
+  // complaint, so nothing downstream would have reported the problem.
+  it('throws rather than defaulting when JWT_SECRET is missing', () => {
+    delete process.env.JWT_SECRET;
+
+    expect(() => configuration()).toThrow(/JWT_SECRET/);
+  });
+
+  it('throws when JWT_SECRET is present but empty', () => {
+    process.env.JWT_SECRET = '';
+
+    expect(() => configuration()).toThrow(/JWT_SECRET/);
+  });
+
+  it('never yields an empty signing secret', () => {
+    process.env.JWT_SECRET = 'c'.repeat(32);
+
+    expect(configuration().jwt.secret).not.toBe('');
+  });
 });

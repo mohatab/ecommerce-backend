@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
-import { JwtModule } from '@nestjs/jwt';
+import { JwtModule, JwtService } from '@nestjs/jwt';
 import { Role, User } from '@prisma/client';
 import { TokenService } from './token.service';
 
@@ -17,6 +17,7 @@ const user: User = {
 
 describe('TokenService', () => {
   let service: TokenService;
+  let jwtService: JwtService;
 
   beforeEach(async () => {
     const config = {
@@ -30,6 +31,7 @@ describe('TokenService', () => {
     }).compile();
 
     service = module.get<TokenService>(TokenService);
+    jwtService = module.get<JwtService>(JwtService);
   });
 
   it('signs an access token carrying the user id and role', async () => {
@@ -48,6 +50,30 @@ describe('TokenService', () => {
     await expect(
       service.verifyAccessToken('not.a.token'),
     ).rejects.toBeInstanceOf(Error);
+  });
+
+  it('rejects a token signed with an algorithm other than HS256', async () => {
+    // Signed with the *correct* secret, so the signature is genuinely valid —
+    // only the algorithm differs. Without an explicit `algorithms` pin,
+    // jsonwebtoken infers the accepted set from the secret type and takes all
+    // of HS256/384/512, which lets the token's own header choose how it is
+    // verified. This asserts the header no longer gets that vote.
+    const hs512 = await jwtService.signAsync(
+      { sub: user.id, role: user.role },
+      { algorithm: 'HS512' },
+    );
+
+    await expect(service.verifyAccessToken(hs512)).rejects.toBeInstanceOf(
+      Error,
+    );
+  });
+
+  it('still accepts the HS256 tokens it issues itself', async () => {
+    const token = await service.signAccessToken(user);
+
+    await expect(service.verifyAccessToken(token)).resolves.toMatchObject({
+      sub: 'user-1',
+    });
   });
 
   it('generates unique high-entropy refresh tokens', () => {

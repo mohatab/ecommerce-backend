@@ -53,10 +53,31 @@ export class RefreshTokenService {
       throw new UnauthorizedException(REJECTION);
     }
 
-    await this.prisma.refreshToken.update({
-      where: { id: existing.id },
+    // Compare-and-swap, not a plain update. The `revokedAt: null` predicate
+    // travels *with* the write, so consuming the token is a single atomic
+    // statement rather than the read-check-write above it. Without this,
+    // two requests presenting the same token concurrently both read
+    // `revokedAt: null`, both pass the check above, and both rotate — two
+    // live siblings in one family, and the reuse detection never fires. The
+    // token would have been consumed twice without ever being *observed* as
+    // consumed.
+    //
+    // Postgres serialises the two updateMany statements on the row itself,
+    // so exactly one can match `revokedAt: null`. No SELECT FOR UPDATE, no
+    // advisory lock, and no transaction held across the JWT signing below.
+    const consumed = await this.prisma.refreshToken.updateMany({
+      where: { id: existing.id, revokedAt: null },
       data: { revokedAt: new Date() },
     });
+
+    // Lost the race: someone else consumed this exact token between our read
+    // and our write. On the wire that is indistinguishable from a replayed
+    // steal — the same judgement the revokedAt branch above makes — so it
+    // gets the same answer.
+    if (consumed.count === 0) {
+      await this.revokeFamily(existing.familyId);
+      throw new UnauthorizedException(REJECTION);
+    }
 
     const token = await this.issue(existing.userId, existing.familyId);
 
