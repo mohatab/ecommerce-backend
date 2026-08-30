@@ -42,6 +42,7 @@ export class AuthController {
   @ApiOperation({ summary: 'Register a new account' })
   @ApiResponse({ status: 201, description: 'Account created' })
   @ApiResponse({ status: 409, description: 'Email already registered' })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
   async register(@Body() dto: RegisterDto): Promise<AuthResponseDto> {
     return AuthResponseDto.from(
       await this.authService.register(dto.email, dto.password),
@@ -58,6 +59,7 @@ export class AuthController {
   @ApiOperation({ summary: 'Exchange credentials for tokens' })
   @ApiResponse({ status: 200, description: 'Authenticated' })
   @ApiResponse({ status: 401, description: 'Invalid email or password' })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
   async login(@Body() dto: LoginDto): Promise<AuthResponseDto> {
     return AuthResponseDto.from(
       await this.authService.login(dto.email, dto.password),
@@ -74,6 +76,7 @@ export class AuthController {
   @ApiOperation({ summary: 'Rotate a refresh token' })
   @ApiResponse({ status: 200, description: 'New token pair issued' })
   @ApiResponse({ status: 401, description: 'Invalid refresh token' })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
   async refresh(@Body() dto: RefreshDto): Promise<AuthResponseDto> {
     return AuthResponseDto.from(
       await this.authService.refresh(dto.refreshToken),
@@ -85,6 +88,7 @@ export class AuthController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Revoke every refresh token for the caller' })
   @ApiResponse({ status: 204, description: 'Logged out' })
+  @ApiResponse({ status: 401, description: 'Missing or invalid token' })
   // request.user is guaranteed by the global JwtAuthGuard; these routes are
   // not marked @Public(), so an unauthenticated request never reaches here.
   async logout(@Req() request: Request): Promise<void> {

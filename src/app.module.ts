@@ -21,9 +21,18 @@ import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
     }),
     // ONE throttler, not two. ThrottlerGuard evaluates every configured
     // throttler on every request, so registering a second "auth" entry at
-    // limit 5 would cap /health, /auth/me and /api/v1/ping at 5 req/min too
-    // and break routing.e2e-spec.ts. Stricter auth limits come from a
-    // per-route @Throttle() override of this same throttler instead.
+    // limit 5 would cap /health, /auth/me and /api/v1/ping at 5 req/min too.
+    // Stricter auth limits come from a per-route @Throttle() override of this
+    // same throttler instead — and that override's key must be `default`,
+    // the name forRoot assigns when none is given.
+    //
+    // Note on what this limit actually means: throttle keys are per-handler
+    // (a hash of class + handler + IP), so this is 100 requests/minute PER
+    // ROUTE HANDLER per IP, not 100 across the API. Aggregate exposure is
+    // therefore 100 x the number of routes. /health carries this cap too, so
+    // a load balancer probing faster than ~1.7/s from a single source will
+    // start seeing 429s — confirm that is acceptable before deploying behind
+    // one.
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
     PrismaModule,
     HealthModule,

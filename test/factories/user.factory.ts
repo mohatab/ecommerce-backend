@@ -13,6 +13,16 @@ export const TEST_PASSWORD = 'Test1234!';
 export const TEST_PASSWORD_HASH =
   '$argon2id$v=19$m=19456,t=2,p=1$aTamFzUDCpAT22xy1imxTA$9TVpJxHAGgaZ88HzaMY2eWDv5YRtZksheMSqjVExC5A';
 
+/**
+ * Safe ONLY because the e2e suite is serial (`maxWorkers: 1` in
+ * test/jest-e2e.json). Do not reuse this pattern if per-worker isolation is
+ * ever added — parallel workers would hand out colliding emails.
+ *
+ * Note it resets to 0 for every spec file, because Jest gives each file its
+ * own module registry. `users.email` is @unique, so two spec files that each
+ * create `user1@example.test` without truncating in between will collide with
+ * P2002. Suites using this factory should call `truncateAll()` in `beforeEach`.
+ */
 let sequence = 0;
 
 export async function createUser(
