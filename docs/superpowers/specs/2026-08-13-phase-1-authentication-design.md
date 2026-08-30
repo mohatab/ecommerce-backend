@@ -77,11 +77,55 @@ For a short interval after rotation, the previous token still resolves to its su
 
 Take a lock so refreshes for one user cannot interleave — `SELECT … FOR UPDATE` on the token row, or `pg_advisory_xact_lock` keyed on user id.
 
-**This is not a third option; it is orthogonal.** Serialization makes the race *deterministic* — it does not decide what the loser receives. After the lock, the second request still presents a consumed token, and the server still needs (a)'s or (b)'s semantics to answer it. Locking alone changes nothing observable.
+> **Corrected after the Phase 1 final review.** The original text of this
+> section argued that serialization was purely orthogonal — that "locking alone
+> changes nothing observable" — and rejected it on that basis. **That reasoning
+> was wrong**, and it is corrected below rather than deleted, because the
+> original error is the kind a future phase would otherwise repeat.
 
-**Does our setup support it?** Yes. Row locks and advisory locks are core Postgres and need no Redis, so it is compatible with the "no Redis until Phase 5" constraint. Contention is per-user, not global, so throughput impact on a realistic auth workload is negligible. The cost is complexity: a transaction boundary around the refresh path, and a lock that must not leak across the JWT signing call.
+**The claim that was wrong.** The earlier argument ran: after a lock, the loser
+still presents a consumed token, so the server still needs (a)'s or (b)'s
+semantics to answer it, and therefore locking changes nothing observable.
 
-**Verdict: rejected for Phase 1** — real complexity for a race this client cannot generate. Worth revisiting only alongside (b), and only if a browser client arrives.
+The second half does not follow. **Without atomicity the loser never presents a
+consumed token at all** — it presents one it already read as *unconsumed*. Under
+a plain `findUnique` → check `revokedAt` → `update` sequence, both requests read
+`revokedAt: null`, both pass the check, and both rotate. The result is two live
+siblings in one family and **the reuse detection never fires**: the token was
+consumed twice without ever being observed as consumed. So the difference is
+observable, and it is precisely the difference between approach (a) working and
+approach (a) being silently bypassed.
+
+This was confirmed empirically against Postgres during the final review: under
+the old pattern, two concurrent consumes of the same row both reported success.
+
+**What the original text missed: the option between "nothing" and "a lock".**
+It weighed only `SELECT … FOR UPDATE` and `pg_advisory_xact_lock`, and rejected
+both on complexity — a transaction boundary around the refresh path, and a lock
+that must not leak across the JWT signing call. Those objections are fair, and
+they still stand. But there is a cheaper point in the space: make the *consume*
+step a compare-and-swap, carrying the predicate in the write itself.
+
+```
+UPDATE refresh_tokens SET revoked_at = now()
+ WHERE id = $1 AND revoked_at IS NULL      -- 1 row, or 0 if someone else won
+```
+
+`count === 1` means this request consumed the token. `count === 0` means a
+concurrent request consumed it first — which on the wire is indistinguishable
+from a replayed steal, so it takes the same answer the `revokedAt` branch gives:
+revoke the family, return the uniform 401. Postgres serialises the two
+statements on the row, so exactly one can match.
+
+**Cost:** one statement. No transaction, no explicit lock, nothing held across
+JWT signing, no Redis, no new dependency. The complexity objection that defeats
+(c) does not apply to it.
+
+**Verdict: adopted for Phase 1.** Row-level and advisory locking remain
+**rejected** — genuine complexity for a race this client shape cannot generate.
+But atomicity at the write boundary is not the same thing as locking, and it is
+what makes approach (a)'s guarantee true as stated rather than true only when
+requests happen not to overlap.
 
 ### 3.5 Recommendation, and what is being traded away
 

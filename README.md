@@ -74,6 +74,10 @@ E2E tests run against a real Postgres instance (not a mock), addressed by
 `TEST_DATABASE_URL`. Migrations are applied once per run, and the suite runs
 serially by design.
 
+> The suite runs serially on purpose — see
+> [`docs/deferred-limitations.md`](docs/deferred-limitations.md), which also
+> records the accepted rate-limiting, token-purge and deployment gaps.
+
 ## API
 
 All domain routes live under `/api/v1`. `/health` is deliberately unprefixed and

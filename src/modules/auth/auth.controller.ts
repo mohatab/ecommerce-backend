@@ -41,6 +41,7 @@ export class AuthController {
   @Post('register')
   @ApiOperation({ summary: 'Register a new account' })
   @ApiResponse({ status: 201, description: 'Account created' })
+  @ApiResponse({ status: 400, description: 'Validation failed' })
   @ApiResponse({ status: 409, description: 'Email already registered' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
   async register(@Body() dto: RegisterDto): Promise<AuthResponseDto> {
@@ -58,6 +59,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Exchange credentials for tokens' })
   @ApiResponse({ status: 200, description: 'Authenticated' })
+  @ApiResponse({ status: 400, description: 'Validation failed' })
   @ApiResponse({ status: 401, description: 'Invalid email or password' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
   async login(@Body() dto: LoginDto): Promise<AuthResponseDto> {
@@ -75,6 +77,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Rotate a refresh token' })
   @ApiResponse({ status: 200, description: 'New token pair issued' })
+  @ApiResponse({ status: 400, description: 'Validation failed' })
   @ApiResponse({ status: 401, description: 'Invalid refresh token' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
   async refresh(@Body() dto: RefreshDto): Promise<AuthResponseDto> {
@@ -89,6 +92,7 @@ export class AuthController {
   @ApiOperation({ summary: 'Revoke every refresh token for the caller' })
   @ApiResponse({ status: 204, description: 'Logged out' })
   @ApiResponse({ status: 401, description: 'Missing or invalid token' })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
   // request.user is guaranteed by the global JwtAuthGuard; these routes are
   // not marked @Public(), so an unauthenticated request never reaches here.
   async logout(@Req() request: Request): Promise<void> {
@@ -103,6 +107,7 @@ export class AuthController {
     status: 401,
     description: 'Missing, invalid, or orphaned token',
   })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
   async me(@Req() request: Request): Promise<UserResponseDto> {
     const user = await this.usersService.findById(request.user!.sub);
 

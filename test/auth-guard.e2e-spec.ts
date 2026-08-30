@@ -92,8 +92,15 @@ describe('global auth guard (e2e)', () => {
     // Unique email per run: the e2e Postgres container is tmpfs-backed and
     // only wiped on container restart, not between `npm run test:e2e`
     // invocations, so a hardcoded email would 409 on every run after the
-    // first. randomUUID() sidesteps that without adding a truncate step
-    // that would race other suites' fixtures within this same run.
+    // first.
+    //
+    // An earlier version of this comment justified the choice by claiming a
+    // truncateAll() step would race other suites' fixtures. That was wrong:
+    // `maxWorkers: 1` in test/jest-e2e.json makes the whole e2e run serial,
+    // so no two suites are ever in flight together and there is no such race.
+    // The honest reason is weaker and sufficient — this suite creates one
+    // user and asserts nothing about the table's contents, so a unique email
+    // is all it needs; truncating would work equally well.
     const email = `guard-${randomUUID()}@example.test`;
 
     const registerResponse = await request(app.getHttpServer())
