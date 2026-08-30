@@ -19,7 +19,7 @@ A production-grade e-commerce backend, built as a portfolio project to demonstra
 
 ## Project Status
 
-This project is being built incrementally, phase by phase. Current phase: **authentication (Phase 1)**.
+This project is being built incrementally, phase by phase. Current phase: **products (Phase 2)**.
 
 - ✅ Project structure, config validation, Prisma wiring, health check, Swagger, Docker (Postgres)
 - ✅ Foundation: `/api/v1` versioning, pagination primitives, Prisma error mapping, e2e harness, CI
