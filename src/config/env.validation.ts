@@ -27,4 +27,14 @@ export const envValidationSchema = Joi.object({
   JWT_SECRET: Joi.string().min(32).required(),
   JWT_ACCESS_TTL: Joi.string().pattern(TTL_PATTERN).default('15m'),
   JWT_REFRESH_TTL: Joi.string().pattern(TTL_PATTERN).default('7d'),
+  // tlds: { allow: false } deliberately. Joi's default email rule validates
+  // the TLD against the IANA list, which rejects reserved TLDs like .test
+  // and private ones like .internal. That is stricter than RegisterDto's
+  // class-validator @IsEmail(), so the default would let registration accept
+  // an address the bootstrap could not create — and it would fail CI, which
+  // bootstraps ci-admin@example.test.
+  ADMIN_EMAIL: Joi.string()
+    .email({ tlds: { allow: false } })
+    .optional(),
+  ADMIN_PASSWORD: Joi.string().min(8).max(128).optional(),
 });
