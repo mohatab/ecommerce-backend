@@ -1,7 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
-import { AppModule } from '../app.module';
 import { AppConfig } from '../config/configuration';
 import { PasswordHasherService } from '../modules/auth/password-hasher.service';
 import {
@@ -53,6 +52,13 @@ export async function bootstrapAdmin(
  * `src/config/` rule holds and Joi validation applies to the script too.
  */
 async function main(): Promise<void> {
+  // Import AppModule dynamically to prevent ConfigModule.forRoot's Joi validation
+  // from running at module scope. Importing AppModule at the top level would
+  // trigger validation at parse time, breaking bootstrap-admin.spec.ts because
+  // it imports this file and CI deliberately does not set DATABASE_URL/JWT_SECRET.
+  // The .js extension is required by nodenext module resolution.
+  const { AppModule } = await import('../app.module.js');
+
   const logger = new Logger('BootstrapAdmin');
   const context = await NestFactory.createApplicationContext(AppModule, {
     logger: ['error', 'warn', 'log'],
