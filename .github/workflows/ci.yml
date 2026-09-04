@@ -100,3 +100,91 @@ jobs:
 
       - name: Build image
         run: docker build -t ecommerce-backend:ci .
+
+  bootstrap:
+    name: Compiled admin bootstrap
+    runs-on: ubuntu-latest
+
+    # Proves the SHIPPED COMPILED ARTIFACT works: it builds the app and runs
+    # the exact command README documents for an operator, against a fresh
+    # database, twice.
+    #
+    # What it deliberately does NOT prove: that the Docker runtime image
+    # starts, connects, and serves. This job runs `node dist/...` on the
+    # runner, not inside the image. docs/deferred-limitations.md's runtime
+    # image entry stays open and owned by Phase 6.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ecommerce_bootstrap
+        # 5434, distinct from dev (5432) and e2e (5433), so no job can
+        # accidentally bootstrap another job's database.
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5434/ecommerce_bootstrap
+      JWT_SECRET: ci-only-secret-not-used-outside-continuous-integration
+      ADMIN_EMAIL: ci-admin@example.test
+      ADMIN_PASSWORD: CiBootstrap1234!
+      PGPASSWORD: postgres
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Build
+        run: npm run build
+
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+
+      - name: Bootstrap the admin (first run)
+        run: node dist/scripts/bootstrap-admin.js
+
+      - name: Assert an ADMIN row exists, and capture its digest
+        run: |
+          set -euo pipefail
+          ROLE=$(psql -h localhost -p 5434 -U postgres -d ecommerce_bootstrap -tAc \
+            "SELECT role FROM users WHERE email = '$ADMIN_EMAIL';")
+          test "$ROLE" = "ADMIN"
+          psql -h localhost -p 5434 -U postgres -d ecommerce_bootstrap -tAc \
+            "SELECT password_hash FROM users WHERE email = '$ADMIN_EMAIL';" > /tmp/hash-before
+          test -s /tmp/hash-before
+
+      - name: Bootstrap the admin (second run)
+        run: node dist/scripts/bootstrap-admin.js
+
+      - name: Assert idempotent and the password was not rewritten
+        run: |
+          set -euo pipefail
+          COUNT=$(psql -h localhost -p 5434 -U postgres -d ecommerce_bootstrap -tAc \
+            "SELECT count(*) FROM users WHERE email = '$ADMIN_EMAIL';")
+          test "$COUNT" = "1"
+          ROLE=$(psql -h localhost -p 5434 -U postgres -d ecommerce_bootstrap -tAc \
+            "SELECT role FROM users WHERE email = '$ADMIN_EMAIL';")
+          test "$ROLE" = "ADMIN"
+          psql -h localhost -p 5434 -U postgres -d ecommerce_bootstrap -tAc \
+            "SELECT password_hash FROM users WHERE email = '$ADMIN_EMAIL';" > /tmp/hash-after
+          # The assertion that actually pins the never-overwrite rule.
+          # Exit-code-only checking would pass against a script that silently
+          # reset the credential on every run.
+          diff /tmp/hash-before /tmp/hash-after

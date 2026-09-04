@@ -14,6 +14,10 @@ export interface AppConfig {
     accessTtl: string;
     refreshTtl: string;
   };
+  admin: {
+    email: string | undefined;
+    password: string | undefined;
+  };
 }
 
 /**
@@ -55,5 +59,12 @@ export default (): AppConfig => ({
     secret: requireEnv('JWT_SECRET'),
     accessTtl: process.env.JWT_ACCESS_TTL ?? '15m',
     refreshTtl: process.env.JWT_REFRESH_TTL ?? '7d',
+  },
+  admin: {
+    // Optional by design: the API must boot without bootstrap credentials.
+    // The bootstrap script requires them at runtime and aborts loudly if
+    // either is missing. They are never read on any request path.
+    email: process.env.ADMIN_EMAIL,
+    password: process.env.ADMIN_PASSWORD,
   },
 });

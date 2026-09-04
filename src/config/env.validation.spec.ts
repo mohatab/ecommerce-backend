@@ -188,4 +188,30 @@ describe('envValidationSchema', () => {
       expect(rejectedKeys(error)).toContain('TEST_DATABASE_URL');
     });
   });
+
+  describe('admin bootstrap credentials', () => {
+    it('accepts an environment with no admin bootstrap variables', () => {
+      expect(validate(validEnv()).error).toBeUndefined();
+    });
+
+    it('rejects a malformed ADMIN_EMAIL', () => {
+      const { error } = validate(validEnv({ ADMIN_EMAIL: 'not-an-email' }));
+
+      expect(rejectedKeys(error)).toContain('ADMIN_EMAIL');
+    });
+
+    it('accepts an ADMIN_EMAIL on a reserved TLD, which CI and the test corpus use', () => {
+      const { error } = validate(
+        validEnv({ ADMIN_EMAIL: 'ci-admin@example.test' }),
+      );
+
+      expect(error).toBeUndefined();
+    });
+
+    it('rejects an ADMIN_PASSWORD below the minimum length', () => {
+      const { error } = validate(validEnv({ ADMIN_PASSWORD: 'short' }));
+
+      expect(rejectedKeys(error)).toContain('ADMIN_PASSWORD');
+    });
+  });
 });

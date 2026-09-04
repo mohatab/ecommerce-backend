@@ -8,6 +8,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { HealthModule } from './modules/health/health.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
+import { RolesGuard } from './modules/auth/guards/roles.guard';
 
 @Module({
   imports: [
@@ -53,6 +54,12 @@ import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
     ThrottlerGuard,
     { provide: APP_GUARD, useExisting: ThrottlerGuard },
     { provide: APP_GUARD, useExisting: JwtAuthGuard },
+    // RolesGuard runs third and must stay third: it reads request.user, which
+    // JwtAuthGuard populates. Registered via useExisting against AuthModule's
+    // class-token provider for the same reason JwtAuthGuard is — APP_GUARD
+    // providers are invisible to overrideGuard(), so tests need a real
+    // injectable token to target with overrideProvider().
+    { provide: APP_GUARD, useExisting: RolesGuard },
   ],
 })
 export class AppModule {}
