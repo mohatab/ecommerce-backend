@@ -7,6 +7,8 @@ import { envValidationSchema } from './config/env.validation';
 import { PrismaModule } from './prisma/prisma.module';
 import { HealthModule } from './modules/health/health.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { CategoriesModule } from './modules/categories/categories.module';
+import { ProductsModule } from './modules/products/products.module';
 import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
 import { RolesGuard } from './modules/auth/guards/roles.guard';
 
@@ -38,6 +40,8 @@ import { RolesGuard } from './modules/auth/guards/roles.guard';
     PrismaModule,
     HealthModule,
     AuthModule,
+    CategoriesModule,
+    ProductsModule,
   ],
   providers: [
     // ThrottlerGuard is registered under its own token first, then aliased
