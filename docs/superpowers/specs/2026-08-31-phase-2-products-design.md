@@ -431,6 +431,16 @@ Phase 1 spec §11 instructed Phase 2 to *reshape the DTO, not the endpoint* when
 
 **Conclusion: no reshape is required, and none should be made.** This is the documented outcome the Phase 1 instruction asked for — an explicit evaluation, not silence. If implementation discovers a misfit, changing the primitive remains the correct response and must be recorded in the plan rather than worked around at the endpoint.
 
+**Outcome, confirmed 2026-09-10 against the shipped endpoints:**
+
+**No reshape was required, and none was made.** The strongest evidence is that all three primitives remain at their original Phase 1 commits: `src/common/dto/pagination-query.dto.ts` and `src/common/dto/paginated.dto.ts` each have exactly one commit in their history (`99fbe39`), and `src/common/swagger/api-paginated-response.decorator.ts` has one (`7adc1c8`). Across seven Phase 2 tasks the primitives were consumed by four call sites — `ProductsService.list`, `CategoriesService.list`, `ProductsController.list`, and `CategoriesController.list` — plus `ProductListQueryDto`, which extends `PaginationQueryDto`. Not one of them required an edit. (The admin write routes deliberately consume none of these: they take no list query and return no paginated collection.)
+
+`ProductListQueryDto extends PaginationQueryDto` carried `categoryId`, `minPriceCents`, `maxPriceCents`, `sort`, and `order` **without modifying the base class**. Task 6's e2e proves at runtime that `whitelist`/`forbidNonWhitelisted` accept the inherited `page`/`limit` alongside the subclass fields, and reject an unknown query key with 400. `PaginatedDto.from(items, total, query)` accepted the service output unchanged — both `ProductsController` and `CategoriesController` call it directly, with no adapter and no intermediate type. `@ApiPaginatedResponse` renders correctly for both `ProductResponseDto` and `CategoryResponseDto`, composing the response schema as `allOf[$ref PaginatedDto, { data: <Model>[], meta: PaginationMetaDto }]`.
+
+**No endpoint was contorted to preserve a primitive's shape.** Both list handlers are a service call, a `.map` through the response DTO, and `PaginatedDto.from`. One property was probed rather than assumed: mutating `ProductsService` from `count({ where })` to `count()` fails three e2e tests, so `meta.total` is genuinely pinned to the *filtered* result set and not the whole table. Defaults are consistent across both collections — `page=1`, `limit=20` from the shared base; products additionally default `sort=createdAt`, `order=desc`. Categories expose only `page`/`limit`, their `name asc` ordering being a service-side decision rather than a client parameter.
+
+The primitives are now proven by real consumers rather than by unit tests alone, which is exactly what Phase 1 spec §11 asked Phase 2 to establish. The escape hatch stated in the paragraph above remains valid: if a future misfit appears, changing the primitive is still the correct response.
+
 ### 8.3 Filters
 
 `ProductListQueryDto` (public):
