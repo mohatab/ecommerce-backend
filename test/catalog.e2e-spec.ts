@@ -165,6 +165,27 @@ describe('public catalog (e2e)', () => {
       );
       expect(item).not.toHaveProperty('updatedAt');
     });
+
+    it('never exposes a floating-point price, on the list or the detail route', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        priceCents: 4999,
+      });
+
+      const list = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .expect(200);
+      const [listItem] = (list.body as PaginatedBody<ProductItem>).data;
+      expect(Number.isInteger(listItem.priceCents)).toBe(true);
+      expect(listItem.priceCents).toBe(4999);
+
+      const detail = await request(app.getHttpServer())
+        .get(`/api/v1/products/${product.id}`)
+        .expect(200);
+      const detailBody = detail.body as ProductItem;
+      expect(Number.isInteger(detailBody.priceCents)).toBe(true);
+      expect(detailBody.priceCents).toBe(4999);
+    });
   });
 
   describe('categories list', () => {
@@ -228,6 +249,35 @@ describe('public catalog (e2e)', () => {
 
       expect(body.data.map((p) => p.name)).toEqual(['Second']);
       expect(body.meta).toEqual({ page: 2, limit: 1, total: 3, totalPages: 3 });
+    });
+
+    it('reports correct metadata across pages, including a partial last page', async () => {
+      const category = await createCategory(prisma);
+
+      for (let i = 0; i < 25; i += 1) {
+        await createProduct(prisma, category.id, { priceCents: 1000 + i });
+      }
+
+      const first = await request(app.getHttpServer())
+        .get('/api/v1/products?page=1&limit=10')
+        .expect(200);
+      const firstBody = first.body as PaginatedBody<ProductItem>;
+
+      expect(firstBody.meta).toEqual({
+        page: 1,
+        limit: 10,
+        total: 25,
+        totalPages: 3,
+      });
+      expect(firstBody.data).toHaveLength(10);
+
+      const last = await request(app.getHttpServer())
+        .get('/api/v1/products?page=3&limit=10')
+        .expect(200);
+      const lastBody = last.body as PaginatedBody<ProductItem>;
+
+      expect(lastBody.data).toHaveLength(5);
+      expect(lastBody.meta.page).toBe(3);
     });
   });
 
@@ -349,6 +399,19 @@ describe('public catalog (e2e)', () => {
       await request(app.getHttpServer())
         .get('/api/v1/products?limit=101')
         .expect(400);
+    });
+
+    it('rejects the admin-only status filter with 400', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/products?status=inactive')
+        .expect(400);
+
+      const body = response.body as ErrorBody;
+
+      expect(Object.keys(body).sort()).toEqual(
+        ['statusCode', 'message', 'error', 'timestamp', 'path'].sort(),
+      );
+      expect(body.statusCode).toBe(400);
     });
   });
 

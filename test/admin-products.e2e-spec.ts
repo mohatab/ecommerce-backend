@@ -1,4 +1,6 @@
 import { INestApplication } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
 import { randomUUID } from 'node:crypto';
 import { Role } from '@prisma/client';
 import request from 'supertest';
@@ -90,6 +92,25 @@ describe('admin products (e2e)', () => {
     return login(customer.email);
   };
 
+  // Ruling 32: the dangerous invalid token on an admin route is not
+  // `Bearer not-a-jwt` (Phase 1's auth-guard suite already pins that on
+  // /auth/me) — it is a well-formed token forging the exact claim shape
+  // RolesGuard reads. Signing with the real secret (the control) proves the
+  // 401 above comes from the signature alone.
+  const claimToken = (userId: string, secret: string): string =>
+    new JwtService().sign(
+      { sub: userId, role: Role.ADMIN },
+      { secret, algorithm: 'HS256' },
+    );
+
+  const realJwtSecret = (): string => {
+    const secret = app.get(ConfigService).get<string>('jwt.secret');
+    if (!secret) {
+      throw new Error('jwt.secret is not configured for the test app');
+    }
+    return secret;
+  };
+
   describe('POST /api/v1/admin/products', () => {
     const body = (categoryId: string): Record<string, unknown> => ({
       name: 'Desk Lamp',
@@ -168,6 +189,36 @@ describe('admin products (e2e)', () => {
         .send({ ...body(category.id), priceCents: 49.99 })
         .expect(400);
     });
+
+    it('returns 401 for a forged ADMIN token signed with the wrong secret, and creates nothing', async () => {
+      const category = await createCategory(prisma);
+      const admin = await createUser(prisma, { role: Role.ADMIN });
+      const forged = claimToken(admin.id, 'not-the-real-secret');
+
+      await request(app.getHttpServer())
+        .post('/api/v1/admin/products')
+        .set('Authorization', `Bearer ${forged}`)
+        .send(body(category.id))
+        .expect(401);
+
+      const count = await prisma.product.count();
+      expect(count).toBe(0);
+    });
+
+    it('control: the identical payload signed with the real secret succeeds', async () => {
+      const category = await createCategory(prisma);
+      const admin = await createUser(prisma, { role: Role.ADMIN });
+      const control = claimToken(admin.id, realJwtSecret());
+
+      await request(app.getHttpServer())
+        .post('/api/v1/admin/products')
+        .set('Authorization', `Bearer ${control}`)
+        .send(body(category.id))
+        .expect(201);
+
+      const count = await prisma.product.count();
+      expect(count).toBe(1);
+    });
   });
 
   describe('PATCH /api/v1/admin/products/:id', () => {
@@ -225,6 +276,43 @@ describe('admin products (e2e)', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({ priceCents: 100 })
         .expect(404);
+    });
+
+    it('returns 409 for an unknown categoryId, leaving the product unchanged', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id);
+      const token = await adminToken();
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/admin/products/${product.id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ categoryId: randomUUID() })
+        .expect(409);
+
+      const row = await prisma.product.findUnique({
+        where: { id: product.id },
+      });
+      expect(row?.categoryId).toBe(category.id);
+    });
+
+    it('returns 401 for a forged ADMIN token signed with the wrong secret, and leaves the product unchanged', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        name: 'Original Name',
+      });
+      const admin = await createUser(prisma, { role: Role.ADMIN });
+      const forged = claimToken(admin.id, 'not-the-real-secret');
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/admin/products/${product.id}`)
+        .set('Authorization', `Bearer ${forged}`)
+        .send({ name: 'Forged Update' })
+        .expect(401);
+
+      const row = await prisma.product.findUnique({
+        where: { id: product.id },
+      });
+      expect(row?.name).toBe('Original Name');
     });
 
     it('reactivates a deactivated product, which reappears in the public list', async () => {
@@ -296,6 +384,23 @@ describe('admin products (e2e)', () => {
         .expect(404);
     });
 
+    it('returns 401 for a forged ADMIN token signed with the wrong secret, and does not deactivate the product', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id);
+      const admin = await createUser(prisma, { role: Role.ADMIN });
+      const forged = claimToken(admin.id, 'not-the-real-secret');
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/admin/products/${product.id}`)
+        .set('Authorization', `Bearer ${forged}`)
+        .expect(401);
+
+      const row = await prisma.product.findUnique({
+        where: { id: product.id },
+      });
+      expect(row?.isActive).toBe(true);
+    });
+
     it('soft-deletes: the row survives with isActive false, and 404s publicly', async () => {
       const category = await createCategory(prisma);
       const product = await createProduct(prisma, category.id);
@@ -315,6 +420,75 @@ describe('admin products (e2e)', () => {
       await request(app.getHttpServer())
         .get(`/api/v1/products/${product.id}`)
         .expect(404);
+    });
+  });
+
+  describe('cross-feature lifecycle', () => {
+    it('walks create, publish, deactivate, and restore entirely through HTTP', async () => {
+      const category = await createCategory(prisma);
+      const token = await adminToken();
+
+      const created = await request(app.getHttpServer())
+        .post('/api/v1/admin/products')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          name: 'Lifecycle Lamp',
+          description: 'Created through the admin API.',
+          priceCents: 4999,
+          categoryId: category.id,
+        })
+        .expect(201);
+
+      const productId = (created.body as ProductItem).id;
+
+      const listAfterCreate = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .expect(200);
+      const afterCreate = listAfterCreate.body as PaginatedBody<ProductItem>;
+      expect(afterCreate.data.map((p) => p.id)).toContain(productId);
+      const totalAfterCreate = afterCreate.meta.total;
+
+      await request(app.getHttpServer())
+        .get(`/api/v1/products/${productId}`)
+        .expect(200);
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/admin/products/${productId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(204);
+
+      const listAfterDelete = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .expect(200);
+      const afterDelete = listAfterDelete.body as PaginatedBody<ProductItem>;
+      expect(afterDelete.data.map((p) => p.id)).not.toContain(productId);
+      expect(afterDelete.meta.total).toBe(totalAfterCreate - 1);
+
+      await request(app.getHttpServer())
+        .get(`/api/v1/products/${productId}`)
+        .expect(404);
+
+      const rowAfterDelete = await prisma.product.findUnique({
+        where: { id: productId },
+      });
+      expect(rowAfterDelete).not.toBeNull();
+      expect(rowAfterDelete?.isActive).toBe(false);
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/admin/products/${productId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ isActive: true })
+        .expect(200);
+
+      const listAfterRestore = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .expect(200);
+      const afterRestore = listAfterRestore.body as PaginatedBody<ProductItem>;
+      expect(afterRestore.data.map((p) => p.id)).toContain(productId);
+
+      await request(app.getHttpServer())
+        .get(`/api/v1/products/${productId}`)
+        .expect(200);
     });
   });
 
