@@ -19,12 +19,12 @@ A production-grade e-commerce backend, built as a portfolio project to demonstra
 
 ## Project Status
 
-This project is being built incrementally, phase by phase. Current phase: **products (Phase 2)**.
+This project is being built incrementally, phase by phase. Current phase: **orders (Phase 3)**.
 
 - ✅ Project structure, config validation, Prisma wiring, health check, Swagger, Docker (Postgres)
 - ✅ Foundation: `/api/v1` versioning, pagination primitives, Prisma error mapping, e2e harness, CI
 - ✅ Authentication: register, login, refresh with rotation and reuse detection, logout, global fail-closed JWT guard, rate limiting
-- ⬜ Products
+- ✅ Products: public catalog reads, admin-only writes, role-based authorization, admin bootstrap
 - ⬜ Orders
 - ⬜ Payments
 - ⬜ Redis caching & BullMQ background jobs
@@ -91,10 +91,41 @@ unversioned so infrastructure probes have a stable path.
 | `POST /api/v1/auth/refresh` | public | 200 | Rotates the token; reuse revokes the family |
 | `POST /api/v1/auth/logout` | **Bearer** | 204 | Revokes every refresh token for the caller |
 | `GET /api/v1/auth/me` | **Bearer** | 200 | The authenticated principal |
+| `GET /api/v1/products` | public | 200 | Active products only; paginated |
+| `GET /api/v1/products/:id` | public | 200 | Deactivated product → 404 |
+| `GET /api/v1/categories` | public | 200 | |
+| `POST /api/v1/admin/products` | **Bearer (ADMIN)** | 201 | Unknown `categoryId` → 409 |
+| `PATCH /api/v1/admin/products/:id` | **Bearer (ADMIN)** | 200 | Unknown id → 404; unknown `categoryId` → 409; `{ "isActive": true }` restores |
+| `DELETE /api/v1/admin/products/:id` | **Bearer (ADMIN)** | 204 | Soft deactivation, not a delete; unknown id → 404 |
 
 Authentication is **default-deny**: a route without an explicit `@Public()` marker
 is protected by a global JWT guard. Register, login, and refresh are rate-limited to
-5 requests/minute; everything else to 100/minute.
+5 requests/minute; everything else to 100/minute. The three public catalog reads
+need no token; the admin product routes require a Bearer token for a user with the
+`ADMIN` role.
+
+Phase 2 ships no category write route, so a category must exist before
+`POST /api/v1/admin/products` can succeed — until one arrives, insert the
+category directly in the database. A deactivated product (`DELETE`) is
+recoverable only by an operator who already holds its id: there is no admin
+list route to rediscover it once lost.
+
+### Creating the first administrator
+
+Registration always creates a `CUSTOMER`. The first `ADMIN` comes from the
+bootstrap command, which is idempotent and never overwrites an existing
+user's password:
+
+```bash
+# Set ADMIN_EMAIL and ADMIN_PASSWORD in .env first
+npm run build
+node dist/scripts/bootstrap-admin.js
+```
+
+If the address is unknown, it creates an administrator. If it already exists,
+it promotes that account and leaves the password untouched. Running it twice
+is safe. Change the password after first login and remove `ADMIN_PASSWORD`
+from the environment.
 
 ### Useful Scripts
 

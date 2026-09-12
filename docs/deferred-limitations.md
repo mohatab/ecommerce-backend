@@ -96,6 +96,31 @@ builds" is currently the only assurance — it is not evidence that the containe
 starts, connects, and serves. A smoke test that boots the image against a
 throwaway database belongs with the deployment work.
 
+### The admin catalog write surface is unreachable on a fresh database without a direct database insert
+
+**Owner: unscheduled.**
+
+Phase 2 ships no admin category write route. `CategoriesService.create()` and
+`.update()` exist but have no HTTP caller anywhere in `src/` — the only
+category route is the public `GET /api/v1/categories`. `Product.categoryId`
+is required, so on a fresh database `POST /api/v1/admin/products` returns 409
+(`P2003`, no such category) for every request, forever, until a category row
+exists by some means other than the API. An operator who bootstraps an ADMIN
+on a new deployment can authenticate but cannot create a single product
+through the API; the only way in is inserting a category directly in the
+database.
+
+The same unreachability affects reversal: `DELETE /api/v1/admin/products/:id`
+is a soft deactivation, recoverable with `PATCH { "isActive": true }`, but
+only by a caller who already holds the product's id. No admin list route
+ships, the public list excludes inactive products, and the public detail
+route 404s on one — so once an id is lost, the row is undiscoverable through
+the API even though it still exists.
+
+Both gaps close the same way: an admin category write route and an admin
+product list, matching what spec §7.2 originally scoped before both were
+deferred during implementation.
+
 ---
 
 ## Testing

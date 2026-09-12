@@ -333,6 +333,37 @@ describe('public catalog (e2e)', () => {
         'First',
       ]);
     });
+
+    it('sorts by name in both directions', async () => {
+      const category = await createCategory(prisma);
+      await createProduct(prisma, category.id, { name: 'Zebra Lamp' });
+      await createProduct(prisma, category.id, { name: 'Apple Lamp' });
+      await createProduct(prisma, category.id, { name: 'Mango Lamp' });
+
+      const ascResponse = await request(app.getHttpServer())
+        .get('/api/v1/products?sort=name&order=asc')
+        .expect(200);
+
+      const ascBody = ascResponse.body as PaginatedBody<ProductItem>;
+
+      expect(ascBody.data.map((p) => p.name)).toEqual([
+        'Apple Lamp',
+        'Mango Lamp',
+        'Zebra Lamp',
+      ]);
+
+      const descResponse = await request(app.getHttpServer())
+        .get('/api/v1/products?sort=name&order=desc')
+        .expect(200);
+
+      const descBody = descResponse.body as PaginatedBody<ProductItem>;
+
+      expect(descBody.data.map((p) => p.name)).toEqual([
+        'Zebra Lamp',
+        'Mango Lamp',
+        'Apple Lamp',
+      ]);
+    });
   });
 
   describe('products filters', () => {
