@@ -6,6 +6,7 @@ import { UsersModule } from '../users/users.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { RolesGuard } from './guards/roles.guard';
 import { PasswordHasherService } from './password-hasher.service';
 import { RefreshTokenService } from './refresh-token.service';
 import { TokenService } from './token.service';
@@ -27,7 +28,11 @@ import { TokenService } from './token.service';
     TokenService,
     RefreshTokenService,
     JwtAuthGuard,
+    RolesGuard,
   ],
-  exports: [TokenService, JwtAuthGuard],
+  // PasswordHasherService is exported so the bootstrap script hashes with the
+  // real Argon2id hasher and its real cost parameters, rather than a second
+  // implementation that could drift.
+  exports: [TokenService, JwtAuthGuard, RolesGuard, PasswordHasherService],
 })
 export class AuthModule {}

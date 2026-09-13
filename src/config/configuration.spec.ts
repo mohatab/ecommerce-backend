@@ -55,4 +55,26 @@ describe('configuration', () => {
 
     expect(configuration().jwt.secret).not.toBe('');
   });
+
+  it('exposes admin bootstrap credentials when they are set', () => {
+    process.env.JWT_SECRET = 'd'.repeat(32);
+    process.env.ADMIN_EMAIL = 'boss@example.test';
+    process.env.ADMIN_PASSWORD = 'Test1234!';
+
+    const config = configuration();
+
+    expect(config.admin.email).toBe('boss@example.test');
+    expect(config.admin.password).toBe('Test1234!');
+  });
+
+  it('leaves admin bootstrap credentials undefined when absent', () => {
+    process.env.JWT_SECRET = 'e'.repeat(32);
+    delete process.env.ADMIN_EMAIL;
+    delete process.env.ADMIN_PASSWORD;
+
+    const config = configuration();
+
+    expect(config.admin.email).toBeUndefined();
+    expect(config.admin.password).toBeUndefined();
+  });
 });

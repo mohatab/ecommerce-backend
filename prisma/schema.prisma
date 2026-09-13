@@ -39,3 +39,32 @@ model RefreshToken {
   @@index([userId])
   @@map("refresh_tokens")
 }
+
+model Category {
+  id        String    @id @default(uuid(7))
+  name      String    @unique
+  slug      String    @unique
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  products  Product[]
+
+  @@map("categories")
+}
+
+model Product {
+  id          String   @id @default(uuid(7))
+  name        String
+  description String
+  priceCents  Int      @map("price_cents")
+  currency    String   @default("USD")
+  imageUrl    String?  @map("image_url")
+  isActive    Boolean  @default(true) @map("is_active")
+  categoryId  String   @map("category_id")
+  category    Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([categoryId])
+  @@index([isActive, createdAt])
+  @@map("products")
+}
