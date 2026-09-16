@@ -9,6 +9,7 @@ import { HealthModule } from './modules/health/health.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { CategoriesModule } from './modules/categories/categories.module';
 import { ProductsModule } from './modules/products/products.module';
+import { CartModule } from './modules/cart/cart.module';
 import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
 import { RolesGuard } from './modules/auth/guards/roles.guard';
 
@@ -42,6 +43,7 @@ import { RolesGuard } from './modules/auth/guards/roles.guard';
     AuthModule,
     CategoriesModule,
     ProductsModule,
+    CartModule,
   ],
   providers: [
     // ThrottlerGuard is registered under its own token first, then aliased
