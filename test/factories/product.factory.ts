@@ -27,6 +27,9 @@ export async function createProduct(
       // Integer minor units, always. Never a decimal literal here.
       priceCents: 1000 + sequence,
       currency: 'USD',
+      // Phase 3: factory products are sellable by default. Tests that care
+      // about stock pass an explicit override.
+      stockQuantity: 100,
       isActive: true,
       categoryId,
       ...overrides,
