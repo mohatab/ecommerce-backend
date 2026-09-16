@@ -1,5 +1,6 @@
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { Prisma } from '@prisma/client';
 import { ProductsService } from './products.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
@@ -10,6 +11,15 @@ import {
 
 describe('ProductsService', () => {
   let service: ProductsService;
+
+  type UpdateManyArgs = [
+    {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    },
+  ];
+  type FindUniqueArgs = [{ where: { id: string }; select?: unknown }];
+
   let prisma: {
     product: {
       findMany: jest.Mock;
@@ -17,6 +27,8 @@ describe('ProductsService', () => {
       findFirst: jest.Mock;
       create: jest.Mock;
       update: jest.Mock;
+      updateMany: jest.Mock<Promise<{ count: number }>, UpdateManyArgs>;
+      findUnique: jest.Mock<Promise<unknown>, FindUniqueArgs>;
     };
     $transaction: jest.Mock;
   };
@@ -29,6 +41,12 @@ describe('ProductsService', () => {
         findFirst: jest.fn(),
         create: jest.fn(),
         update: jest.fn(),
+        updateMany: jest
+          .fn<Promise<{ count: number }>, UpdateManyArgs>()
+          .mockResolvedValue({ count: 1 }),
+        findUnique: jest
+          .fn<Promise<unknown>, FindUniqueArgs>()
+          .mockResolvedValue(null),
       },
       $transaction: jest.fn().mockResolvedValue([[], 0]),
     };
@@ -185,6 +203,122 @@ describe('ProductsService', () => {
         categoryId: 'c1',
       },
       include: { category: true },
+    });
+  });
+
+  describe('decrementStock', () => {
+    it('puts isActive and the stock floor in the WHERE clause, not in JS', async () => {
+      prisma.product.updateMany.mockResolvedValue({ count: 1 });
+
+      const count = await service.decrementStock(
+        prisma as unknown as Prisma.TransactionClient,
+        'product-1',
+        3,
+      );
+
+      expect(count).toBe(1);
+      expect(prisma.product.updateMany.mock.calls[0][0]).toEqual({
+        where: { id: 'product-1', isActive: true, stockQuantity: { gte: 3 } },
+        data: { stockQuantity: { decrement: 3 } },
+      });
+    });
+
+    it('returns 0 when the predicate refuses the write', async () => {
+      prisma.product.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        service.decrementStock(
+          prisma as unknown as Prisma.TransactionClient,
+          'product-1',
+          3,
+        ),
+      ).resolves.toBe(0);
+    });
+  });
+
+  describe('incrementStock', () => {
+    it('restores stock without an isActive predicate', async () => {
+      await service.incrementStock(
+        prisma as unknown as Prisma.TransactionClient,
+        'product-1',
+        2,
+      );
+
+      expect(prisma.product.updateMany.mock.calls[0][0]).toEqual({
+        where: { id: 'product-1' },
+        data: { stockQuantity: { increment: 2 } },
+      });
+    });
+  });
+
+  describe('describeRefusal', () => {
+    it('reports a missing product', async () => {
+      prisma.product.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.describeRefusal(
+          prisma as unknown as Prisma.TransactionClient,
+          'gone',
+        ),
+      ).resolves.toBe('missing');
+    });
+
+    it('reports an inactive product', async () => {
+      prisma.product.findUnique.mockResolvedValue({ isActive: false });
+
+      await expect(
+        service.describeRefusal(
+          prisma as unknown as Prisma.TransactionClient,
+          'p1',
+        ),
+      ).resolves.toBe('inactive');
+    });
+
+    it('reports insufficient stock for an active product', async () => {
+      prisma.product.findUnique.mockResolvedValue({ isActive: true });
+
+      await expect(
+        service.describeRefusal(
+          prisma as unknown as Prisma.TransactionClient,
+          'p1',
+        ),
+      ).resolves.toBe('insufficient-stock');
+    });
+
+    it('never throws, and reads through the transaction client it is given', async () => {
+      prisma.product.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.describeRefusal(
+          prisma as unknown as Prisma.TransactionClient,
+          'gone',
+        ),
+      ).resolves.toBe('missing');
+      expect(prisma.product.findUnique).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('adjustStock', () => {
+    it('refuses an adjustment that would go below zero', async () => {
+      prisma.product.updateMany.mockResolvedValue({ count: 0 });
+      prisma.product.findUnique.mockResolvedValue({ id: 'p1' });
+
+      await expect(service.adjustStock('p1', -5)).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(prisma.product.updateMany.mock.calls[0][0]).toEqual({
+        where: { id: 'p1', stockQuantity: { gte: 5 } },
+        data: { stockQuantity: { increment: -5 } },
+      });
+    });
+
+    it('404s for an unknown id', async () => {
+      prisma.product.updateMany.mockResolvedValue({ count: 0 });
+      prisma.product.findUnique.mockResolvedValue(null);
+
+      await expect(service.adjustStock('nope', 5)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
   });
 });

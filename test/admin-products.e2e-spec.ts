@@ -29,6 +29,7 @@ interface ProductItem {
   description: string;
   priceCents: number;
   currency: string;
+  stockQuantity: number;
   imageUrl: string | null;
   isActive: boolean;
   categoryId: string;
@@ -489,6 +490,125 @@ describe('admin products (e2e)', () => {
       await request(app.getHttpServer())
         .get(`/api/v1/products/${productId}`)
         .expect(200);
+    });
+  });
+
+  describe('POST /api/v1/admin/products/:id/stock-adjustments', () => {
+    it('restocks relatively and returns the new level', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 5,
+      });
+      const token = await adminToken();
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/admin/products/${product.id}/stock-adjustments`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ delta: 7 })
+        .expect(200);
+
+      expect((response.body as ProductItem).stockQuantity).toBe(12);
+    });
+
+    it('removes stock with a negative delta', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 5,
+      });
+      const token = await adminToken();
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/admin/products/${product.id}/stock-adjustments`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ delta: -5 })
+        .expect(200);
+
+      expect((response.body as ProductItem).stockQuantity).toBe(0);
+    });
+
+    it('409s rather than letting stock go negative', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 3,
+      });
+      const token = await adminToken();
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/admin/products/${product.id}/stock-adjustments`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ delta: -4 })
+        .expect(409);
+
+      const unchanged = await prisma.product.findUniqueOrThrow({
+        where: { id: product.id },
+      });
+      expect(unchanged.stockQuantity).toBe(3);
+    });
+
+    it('restocks an inactive product', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 0,
+        isActive: false,
+      });
+      const token = await adminToken();
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/admin/products/${product.id}/stock-adjustments`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ delta: 4 })
+        .expect(200);
+
+      const body = response.body as ProductItem;
+      expect(body.stockQuantity).toBe(4);
+      expect(body.isActive).toBe(false);
+    });
+
+    it('400s on a zero or non-integer delta', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id);
+      const token = await adminToken();
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/admin/products/${product.id}/stock-adjustments`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ delta: 0 })
+        .expect(400);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/admin/products/${product.id}/stock-adjustments`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ delta: 1.5 })
+        .expect(400);
+    });
+
+    it('404s for an unknown product', async () => {
+      const token = await adminToken();
+
+      await request(app.getHttpServer())
+        .post(
+          '/api/v1/admin/products/0195f0a0-0000-7000-8000-0000000000ff/stock-adjustments',
+        )
+        .set('Authorization', `Bearer ${token}`)
+        .send({ delta: 1 })
+        .expect(404);
+    });
+
+    it('403s for a customer and 401s without a token', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id);
+      const token = await customerToken();
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/admin/products/${product.id}/stock-adjustments`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ delta: 1 })
+        .expect(403);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/admin/products/${product.id}/stock-adjustments`)
+        .send({ delta: 1 })
+        .expect(401);
     });
   });
 

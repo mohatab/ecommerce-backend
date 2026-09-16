@@ -21,6 +21,7 @@ interface ProductItem {
   description: string;
   priceCents: number;
   currency: string;
+  stockQuantity: number;
   imageUrl: string | null;
   isActive: boolean;
   categoryId: string;
@@ -156,6 +157,7 @@ describe('public catalog (e2e)', () => {
           'description',
           'priceCents',
           'currency',
+          'stockQuantity',
           'imageUrl',
           'isActive',
           'categoryId',
@@ -185,6 +187,24 @@ describe('public catalog (e2e)', () => {
       const detailBody = detail.body as ProductItem;
       expect(Number.isInteger(detailBody.priceCents)).toBe(true);
       expect(detailBody.priceCents).toBe(4999);
+    });
+
+    it('publishes the exact stock level to unauthenticated callers (D10)', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 9,
+      });
+
+      const list = await request(app.getHttpServer())
+        .get('/api/v1/products')
+        .expect(200);
+      const listBody = list.body as PaginatedBody<ProductItem>;
+      expect(listBody.data[0].stockQuantity).toBe(9);
+
+      const detail = await request(app.getHttpServer())
+        .get(`/api/v1/products/${product.id}`)
+        .expect(200);
+      expect((detail.body as ProductItem).stockQuantity).toBe(9);
     });
   });
 

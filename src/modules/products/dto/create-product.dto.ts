@@ -41,6 +41,13 @@ export class CreateProductDto {
   @IsUppercase()
   currency?: string;
 
+  @ApiPropertyOptional({ example: 10, default: 0, minimum: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  stockQuantity?: number;
+
   @ApiPropertyOptional({ example: 'https://cdn.example.com/lamp.png' })
   @IsOptional()
   @IsUrl()
