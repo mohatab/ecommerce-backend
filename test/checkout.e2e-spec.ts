@@ -98,12 +98,25 @@ describe('Checkout (e2e)', () => {
 
   it('rolls back every decrement when one line cannot be satisfied', async () => {
     const category = await createCategory(prisma);
+    // Checkout decrements in ascending productId order, so this test only
+    // proves a rollback if `available` (which has stock, and so decrements
+    // successfully) is processed BEFORE `soldOut` (which refuses and rolls
+    // the transaction back). uuid7 ids are time-based but not strictly
+    // ordered within the same millisecond, so relying on creation order
+    // alone would make this pass vacuously on an unlucky tie: soldOut could
+    // refuse first, nothing would ever be decremented, and every assertion
+    // below would still hold without proving rollback happened. Fixed ids
+    // pin the sort order instead of leaving it to timing.
     const available = await createProduct(prisma, category.id, {
+      id: '00000000-0000-7000-8000-000000000001',
       stockQuantity: 10,
     });
     const soldOut = await createProduct(prisma, category.id, {
+      id: '00000000-0000-7000-8000-000000000002',
       stockQuantity: 0,
     });
+    expect(available.id < soldOut.id).toBe(true);
+
     await addToCart(available.id, 1);
     await addToCart(soldOut.id, 1);
 

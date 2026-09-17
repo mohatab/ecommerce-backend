@@ -1,7 +1,9 @@
 import {
   ConflictException,
+  Logger,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { CheckoutService } from './checkout.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CartService } from '../cart/cart.service';
@@ -9,16 +11,27 @@ import { ProductsService } from '../products/products.service';
 
 type DecrementArgs = [unknown, string, number];
 
+type TransactionOptions = {
+  isolationLevel: Prisma.TransactionIsolationLevel;
+  maxWait: number;
+  timeout: number;
+};
+
 describe('CheckoutService', () => {
   let service: CheckoutService;
-  let prisma: {
+  // Distinct from `prisma`, and returned by the $transaction mock below, so
+  // every assertion on "was this called with the transaction client" fails
+  // if the service ever slips and calls this.prisma directly instead of tx.
+  let txMock: {
     order: {
       findUnique: jest.Mock<Promise<unknown>, [unknown]>;
       create: jest.Mock<Promise<unknown>, [unknown]>;
     };
+  };
+  let prisma: {
     $transaction: jest.Mock<
       Promise<unknown>,
-      [(tx: unknown) => Promise<unknown>, unknown?]
+      [(tx: unknown) => Promise<unknown>, TransactionOptions?]
     >;
   };
   let cart: {
@@ -46,7 +59,7 @@ describe('CheckoutService', () => {
   });
 
   beforeEach(() => {
-    prisma = {
+    txMock = {
       order: {
         findUnique: jest
           .fn<Promise<unknown>, [unknown]>()
@@ -55,9 +68,14 @@ describe('CheckoutService', () => {
           .fn<Promise<unknown>, [unknown]>()
           .mockResolvedValue({ id: 'order-1', items: [] }),
       },
+    };
+    prisma = {
       $transaction: jest
-        .fn<Promise<unknown>, [(tx: unknown) => Promise<unknown>, unknown?]>()
-        .mockImplementation((callback) => callback(prisma)),
+        .fn<
+          Promise<unknown>,
+          [(tx: unknown) => Promise<unknown>, TransactionOptions?]
+        >()
+        .mockImplementation((callback) => callback(txMock)),
     };
     cart = {
       lockForUpdate: jest
@@ -90,14 +108,14 @@ describe('CheckoutService', () => {
   });
 
   it('locks the cart, then replays a known key without decrementing anything', async () => {
-    prisma.order.findUnique.mockResolvedValue({ id: 'existing', items: [] });
+    txMock.order.findUnique.mockResolvedValue({ id: 'existing', items: [] });
 
     const result = await service.checkout('user-1', 'key-abcdefgh');
 
     expect(result.replayed).toBe(true);
     expect(cart.lockForUpdate).toHaveBeenCalledTimes(1);
     expect(products.decrementStock).not.toHaveBeenCalled();
-    expect(prisma.order.create).not.toHaveBeenCalled();
+    expect(txMock.order.create).not.toHaveBeenCalled();
   });
 
   it('409s on an empty cart', async () => {
@@ -136,6 +154,7 @@ describe('CheckoutService', () => {
     await expect(service.checkout('user-1', 'key-abcdefgh')).rejects.toThrow(
       'Insufficient stock',
     );
+    expect(products.describeRefusal).toHaveBeenCalledWith(txMock, 'a');
 
     products.describeRefusal.mockResolvedValue('inactive');
     await expect(service.checkout('user-1', 'key-abcdefgh')).rejects.toThrow(
@@ -146,6 +165,35 @@ describe('CheckoutService', () => {
     await expect(service.checkout('user-1', 'key-abcdefgh')).rejects.toThrow(
       'Product is no longer available',
     );
+  });
+
+  it('logs a warning only when the refusal is a missing product', async () => {
+    const warnSpy = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    products.decrementStock.mockResolvedValue(0);
+
+    try {
+      products.describeRefusal.mockResolvedValue('insufficient-stock');
+      await expect(service.checkout('user-1', 'key-abcdefgh')).rejects.toThrow(
+        'Insufficient stock',
+      );
+      expect(warnSpy).not.toHaveBeenCalled();
+
+      products.describeRefusal.mockResolvedValue('inactive');
+      await expect(service.checkout('user-1', 'key-abcdefgh')).rejects.toThrow(
+        'Product is no longer available',
+      );
+      expect(warnSpy).not.toHaveBeenCalled();
+
+      products.describeRefusal.mockResolvedValue('missing');
+      await expect(service.checkout('user-1', 'key-abcdefgh')).rejects.toThrow(
+        'Product is no longer available',
+      );
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('reads the price snapshot only after every decrement has succeeded', async () => {
@@ -189,7 +237,33 @@ describe('CheckoutService', () => {
   it('clears the cart after creating the order', async () => {
     await service.checkout('user-1', 'key-abcdefgh');
 
-    expect(prisma.order.create).toHaveBeenCalledTimes(1);
-    expect(cart.clear).toHaveBeenCalledWith(prisma, 'cart-1');
+    expect(txMock.order.create).toHaveBeenCalledTimes(1);
+    expect(cart.clear).toHaveBeenCalledWith(txMock, 'cart-1');
+  });
+
+  it('pins the transaction isolation level and timeouts', async () => {
+    await service.checkout('user-1', 'key-abcdefgh');
+
+    expect(prisma.$transaction.mock.calls[0][1]).toEqual({
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      maxWait: 5_000,
+      timeout: 10_000,
+    });
+  });
+
+  it('runs every transactional step on the transaction client, never the base client', async () => {
+    await service.checkout('user-1', 'key-abcdefgh');
+
+    expect(txMock.order.findUnique).toHaveBeenCalledTimes(1);
+    expect(cart.lockForUpdate).toHaveBeenCalledWith(txMock, 'user-1');
+    expect(cart.listItemsForCheckout).toHaveBeenCalledWith(txMock, 'cart-1');
+    expect(products.decrementStock).toHaveBeenCalledWith(txMock, 'a', 1);
+    expect(products.decrementStock).toHaveBeenCalledWith(txMock, 'b', 1);
+    expect(products.findManyForSnapshot).toHaveBeenCalledWith(txMock, [
+      'a',
+      'b',
+    ]);
+    expect(txMock.order.create).toHaveBeenCalledTimes(1);
+    expect(cart.clear).toHaveBeenCalledWith(txMock, 'cart-1');
   });
 });

@@ -85,6 +85,10 @@ export class CheckoutService {
           a.productId < b.productId ? -1 : a.productId > b.productId ? 1 : 0,
         );
 
+        // ponytail: checkouts of the same product serialise on its row lock,
+        // so single-SKU throughput is bounded by lock hold time (~10-20ms).
+        // Upgrade path is a reservation queue, only if measurement shows the
+        // need.
         for (const item of sortedItems) {
           const count = await this.productsService.decrementStock(
             tx,
