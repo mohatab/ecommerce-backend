@@ -8,12 +8,14 @@ import { truncateAll } from './helpers/truncate';
 import { createUser } from './factories/user.factory';
 import { createCategory } from './factories/category.factory';
 import { createProduct } from './factories/product.factory';
+import { createOrder } from './factories/order.factory';
 
 interface OrderResponseBody {
   id: string;
   status: string;
   totalCents: number;
   currency: string;
+  cancelledAt: string | null;
   items: Array<{
     id: string;
     productId: string;
@@ -271,5 +273,132 @@ describe('Checkout (e2e)', () => {
       .post('/api/v1/orders')
       .set('Idempotency-Key', 'key-jjjjjjjj')
       .expect(401);
+  });
+
+  describe('cancellation', () => {
+    const cancel = (orderId: string) =>
+      request(app.getHttpServer())
+        .post(`/api/v1/orders/${orderId}/cancel`)
+        .set('Authorization', auth());
+
+    it('restores stock and is idempotent, leaving cancelledAt unchanged on replay', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 10,
+      });
+      await addToCart(product.id, 3);
+      const order = await checkout('key-kkkkkkkk').expect(201);
+      const orderBody = order.body as OrderResponseBody;
+
+      const midway = await prisma.product.findUniqueOrThrow({
+        where: { id: product.id },
+      });
+      expect(midway.stockQuantity).toBe(7);
+
+      const cancelled = await cancel(orderBody.id).expect(200);
+      const cancelledBody = cancelled.body as OrderResponseBody;
+
+      expect(cancelledBody.status).toBe('CANCELLED');
+      expect(cancelledBody.cancelledAt).not.toBeNull();
+
+      const restored = await prisma.product.findUniqueOrThrow({
+        where: { id: product.id },
+      });
+      expect(restored.stockQuantity).toBe(10);
+
+      const secondCancel = await cancel(orderBody.id).expect(200);
+      const secondBody = secondCancel.body as OrderResponseBody;
+
+      expect(secondBody.status).toBe('CANCELLED');
+      expect(secondBody.cancelledAt).toBe(cancelledBody.cancelledAt);
+
+      const stillTen = await prisma.product.findUniqueOrThrow({
+        where: { id: product.id },
+      });
+      expect(stillTen.stockQuantity).toBe(10);
+    });
+
+    it('restores stock even for a product deactivated after the order', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 4,
+      });
+      await addToCart(product.id, 1);
+      const order = await checkout('key-llllllll').expect(201);
+      const orderBody = order.body as OrderResponseBody;
+
+      await prisma.product.update({
+        where: { id: product.id },
+        data: { isActive: false },
+      });
+
+      await cancel(orderBody.id).expect(200);
+
+      const restored = await prisma.product.findUniqueOrThrow({
+        where: { id: product.id },
+      });
+      expect(restored.stockQuantity).toBe(4);
+    });
+
+    it("404s on another user's order, 404s on an unknown order, and 401s without a token", async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id);
+      const stranger = await createUser(prisma);
+      const theirs = await createOrder(prisma, stranger.id, [
+        {
+          productId: product.id,
+          productName: product.name,
+          unitPriceCents: product.priceCents,
+          quantity: 1,
+        },
+      ]);
+
+      await cancel(theirs.id).expect(404);
+      await cancel('00000000-0000-7000-8000-000000000000').expect(404);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/orders/${theirs.id}/cancel`)
+        .expect(401);
+    });
+
+    it('replays a key after cancellation, returning the cancelled order', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 5,
+      });
+      await addToCart(product.id, 1);
+      const order = await checkout('key-mmmmmmmm').expect(201);
+      const orderBody = order.body as OrderResponseBody;
+
+      await cancel(orderBody.id).expect(200);
+
+      const replay = await checkout('key-mmmmmmmm').expect(200);
+      const replayBody = replay.body as OrderResponseBody;
+
+      expect(replayBody.id).toBe(orderBody.id);
+      expect(replayBody.status).toBe('CANCELLED');
+      expect(await prisma.order.count()).toBe(1);
+    });
+
+    it('stays visible to its owner via GET /orders/:id after cancellation', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 2,
+      });
+      await addToCart(product.id, 1);
+      const order = await checkout('key-nnnnnnnn').expect(201);
+      const orderBody = order.body as OrderResponseBody;
+
+      await cancel(orderBody.id).expect(200);
+
+      const reread = await request(app.getHttpServer())
+        .get(`/api/v1/orders/${orderBody.id}`)
+        .set('Authorization', auth())
+        .expect(200);
+      const rereadBody = reread.body as OrderResponseBody;
+
+      expect(rereadBody.id).toBe(orderBody.id);
+      expect(rereadBody.status).toBe('CANCELLED');
+    });
   });
 });

@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Headers,
+  HttpCode,
   HttpStatus,
   Param,
   ParseUUIDPipe,
@@ -125,5 +126,28 @@ export class OrdersController {
     response.status(result.replayed ? HttpStatus.OK : HttpStatus.CREATED);
 
     return OrderResponseDto.from(result.order);
+  }
+
+  @Post(':id/cancel')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Cancel a pending order and return its stock',
+    description:
+      'Idempotent: cancelling an already-cancelled order returns it ' +
+      'unchanged and does not restore stock a second time.',
+  })
+  @ApiResponse({ status: 200, description: 'The cancelled order' })
+  @ApiResponse({ status: 401, description: 'Missing or invalid token' })
+  @ApiResponse({
+    status: 404,
+    description: 'No such order, or it belongs to another user',
+  })
+  async cancel(
+    @Req() request: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<OrderResponseDto> {
+    return OrderResponseDto.from(
+      await this.ordersService.cancel(request.user!.sub, id),
+    );
   }
 }

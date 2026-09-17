@@ -1,11 +1,16 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { OrderStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { OrderWithItems } from './dto/order-response.dto';
+import { ProductsService } from '../products/products.service';
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly productsService: ProductsService,
+  ) {}
 
   /** Always scoped to one user; there is no unscoped list route. */
   async listForUser(
@@ -43,5 +48,52 @@ export class OrdersService {
     }
 
     return order;
+  }
+
+  /**
+   * The updateMany is a compare-and-swap: only the caller whose write matched
+   * a PENDING row restores stock, so racing cancels restore EXACTLY ONCE.
+   * Do not replace it with a read, a status check, and an update.
+   */
+  async cancel(userId: string, orderId: string): Promise<OrderWithItems> {
+    return this.prisma.$transaction(async (tx) => {
+      const { count } = await tx.order.updateMany({
+        where: { id: orderId, userId, status: OrderStatus.PENDING },
+        data: { status: OrderStatus.CANCELLED, cancelledAt: new Date() },
+      });
+
+      if (count === 0) {
+        const existing = await tx.order.findFirst({
+          where: { id: orderId, userId },
+          include: { items: true },
+        });
+
+        // Unknown, or another user's: both are 404, so existence never leaks.
+        if (!existing) {
+          throw new NotFoundException('Order not found');
+        }
+
+        // Already cancelled: idempotent, and stock is NOT restored again.
+        return existing;
+      }
+
+      const items = await tx.orderItem.findMany({
+        where: { orderId },
+        orderBy: { productId: 'asc' },
+      });
+
+      for (const item of items) {
+        await this.productsService.incrementStock(
+          tx,
+          item.productId,
+          item.quantity,
+        );
+      }
+
+      return tx.order.findUniqueOrThrow({
+        where: { id: orderId },
+        include: { items: true },
+      });
+    });
   }
 }
