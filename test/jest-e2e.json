@@ -7,6 +7,7 @@
     "^.+\\.(t|j)s$": "ts-jest"
   },
   "globalSetup": "<rootDir>/global-setup.ts",
+  "globalTeardown": "<rootDir>/global-teardown.ts",
   "setupFilesAfterEnv": ["<rootDir>/setup-e2e.ts"],
   "maxWorkers": 1
 }
