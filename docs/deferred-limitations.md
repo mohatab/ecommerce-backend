@@ -121,6 +121,25 @@ Both gaps close the same way: an admin category write route and an admin
 product list, matching what spec §7.2 originally scoped before both were
 deferred during implementation.
 
+### PENDING orders hold stock indefinitely
+
+**Owner: Phase 5 (Redis + BullMQ).**
+
+Checkout decrements stock immediately (`CheckoutService.checkout()`), so an
+order that is never paid and never cancelled holds its units forever. There
+is no expiry, because expiry needs scheduled jobs, which arrive in Phase 5.
+
+Mitigation today: a customer can cancel their own `PENDING` order
+(`POST /api/v1/orders/:id/cancel`) and the stock returns immediately, through
+the same compare-and-swap `OrdersService.cancel()` already uses. The exposure
+is therefore bounded by customer behaviour, not by an attacker — but a bot
+could still hold inventory by checking out and never paying.
+
+The fix is a periodic job that cancels `PENDING` orders older than a
+configured age, reusing the existing cancellation path (design spec §5.6) so
+restoration stays exactly-once. Do not implement a bespoke expiry that writes
+stock directly.
+
 ---
 
 ## Testing
