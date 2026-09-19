@@ -922,7 +922,7 @@ unproven, and the phase is not done.
 
 ## 12. Definition of Done
 
-1. One migration adds stock, three `CHECK` constraints, and four models.
+1. One migration adds stock, four `CHECK` constraints (including the stock floor), and four models.
 2. Cart routes, order routes, checkout and cancel all behave as §6 specifies.
 3. Stock can never be oversold, and C1 proves it against a recorded failing
    control.
