@@ -121,15 +121,17 @@ export class CartService {
    * Idempotent: removing an absent line, or acting on a user with no cart,
    * is a no-op rather than a 404.
    *
-   * Takes the cart lock like every other cart mutation. The two-operation
-   * race this closes (checkout reads the line, DELETE commits, checkout
-   * still orders it) is linearizable on its own — it is equivalent to the
-   * serial history "checkout, then DELETE deleted nothing" — so this is a
-   * uniformity and robustness change, not a bug fix. What it does buy: with
-   * a third concurrent reader, the unlocked version admitted a history with
-   * no equivalent serial order (a GET between DELETE's 204 and checkout's
-   * commit sees the line gone, yet the order still contains it), and it
-   * makes "every cart mutation takes the cart lock" true without exception.
+   * Takes the cart lock like every other cart mutation, so `removeItem`
+   * serialises with `setItem` and with checkout under one synchronisation
+   * model: every cart mutation holds the per-user cart row lock, without
+   * exception. That uniformity is the whole reason for the transaction here.
+   *
+   * It is not a bug fix. The interleaving it removes — checkout reads the
+   * line, DELETE commits its 204, checkout still orders that line — is
+   * linearizable: `DELETE` returns no state, so the history is equivalent to
+   * the serial order "checkout ran, then DELETE found nothing to delete".
+   * The value is that nobody has to redo that argument to convince
+   * themselves the unlocked path was safe.
    *
    * The no-cart early return stays deliberately: `lockForUpdate` upserts, so
    * locking unconditionally would have DELETE create a `carts` row for a
