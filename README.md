@@ -19,13 +19,13 @@ A production-grade e-commerce backend, built as a portfolio project to demonstra
 
 ## Project Status
 
-This project is being built incrementally, phase by phase. Current phase: **orders (Phase 3)**.
+This project is being built incrementally, phase by phase. Current phase: **payments (Phase 4)**.
 
 - ✅ Project structure, config validation, Prisma wiring, health check, Swagger, Docker (Postgres)
 - ✅ Foundation: `/api/v1` versioning, pagination primitives, Prisma error mapping, e2e harness, CI
 - ✅ Authentication: register, login, refresh with rotation and reuse detection, logout, global fail-closed JWT guard, rate limiting
 - ✅ Products: public catalog reads, admin-only writes, role-based authorization, admin bootstrap
-- ⬜ Orders
+- ✅ Cart & orders: transactional checkout, atomic stock decrement, idempotent order creation, cancellation with exactly-once stock restore
 - ⬜ Payments
 - ⬜ Redis caching & BullMQ background jobs
 
@@ -97,12 +97,31 @@ unversioned so infrastructure probes have a stable path.
 | `POST /api/v1/admin/products` | **Bearer (ADMIN)** | 201 | Unknown `categoryId` → 409 |
 | `PATCH /api/v1/admin/products/:id` | **Bearer (ADMIN)** | 200 | Unknown id → 404; unknown `categoryId` → 409; `{ "isActive": true }` restores |
 | `DELETE /api/v1/admin/products/:id` | **Bearer (ADMIN)** | 204 | Soft deactivation, not a delete; unknown id → 404 |
+| `POST /api/v1/admin/products/:id/stock-adjustments` | **Bearer (ADMIN)** | 200 | `{ delta }`, a signed relative change; below zero → 409; unknown id → 404 |
+| `GET /api/v1/cart` | **Bearer** | 200 | The caller's cart; does not create one — an absent cart reads as empty |
+| `PUT /api/v1/cart/items/:productId` | **Bearer** | 200 | `{ quantity }`, integer 1–99; **sets** the quantity, never increments; unknown/inactive product → 404; 51st line → 422 |
+| `DELETE /api/v1/cart/items/:productId` | **Bearer** | 204 | Idempotent; removing an absent line also returns 204 |
+| `POST /api/v1/orders` | **Bearer** | 201 / 200 | Checkout; requires an `Idempotency-Key` header (see below); 201 for a new order, 200 for a replayed key; empty cart, insufficient stock, or an unavailable product → 409; mixed currencies or an oversized total → 422 |
+| `GET /api/v1/orders` | **Bearer** | 200 | The caller's orders only, paginated, newest first |
+| `GET /api/v1/orders/:id` | **Bearer** | 200 | The caller's order only; unknown id or another user's order → 404 |
+| `POST /api/v1/orders/:id/cancel` | **Bearer** | 200 | Idempotent; restores stock exactly once; unknown id or another user's order → 404 |
 
 Authentication is **default-deny**: a route without an explicit `@Public()` marker
 is protected by a global JWT guard. Register, login, and refresh are rate-limited to
 5 requests/minute; everything else to 100/minute. The three public catalog reads
 need no token; the admin product routes require a Bearer token for a user with the
 `ADMIN` role.
+
+### Checkout idempotency
+
+`POST /api/v1/orders` requires an `Idempotency-Key` header: 8–128 characters of
+`A-Z`, `a-z`, `0-9`, `_` or `-`. A missing or malformed key is a 400. The header
+consumes the caller's cart — there is no request body. Replaying the same key
+for the same caller returns the original order with **200** instead of creating
+a second one; a different caller reusing the same key value gets their own new
+order, because the key is scoped to `(userId, idempotencyKey)`. Stock is
+decremented with an atomic, conditional update inside one transaction, so
+concurrent checkouts for the last unit of a product cannot oversell it.
 
 Phase 2 ships no category write route, so a category must exist before
 `POST /api/v1/admin/products` can succeed — until one arrives, insert the
@@ -154,6 +173,9 @@ src/
     health/           # liveness + database check
     auth/             # hashing, tokens, refresh rotation, guards, DTOs
     users/            # User persistence (service-only, no controller)
+    products/         # public catalog, admin writes, stock CAS methods
+    cart/             # per-user cart, locked for checkout
+    orders/           # order reads, checkout transaction, cancellation
 prisma/
   schema.prisma        # Prisma schema (datasource + generator)
   migrations/          # committed migrations, applied via prisma migrate deploy

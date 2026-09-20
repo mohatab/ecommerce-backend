@@ -19,6 +19,12 @@ export class ProductResponseDto {
   @ApiProperty({ example: 'USD' })
   currency!: string;
 
+  // D10 (spec §4.1.1): the exact stock level is PUBLIC by decision, not by
+  // accident of DTO reuse. Removing it from the public catalog is a product
+  // decision, not a cleanup.
+  @ApiProperty({ example: 42, description: 'Units available for sale' })
+  stockQuantity!: number;
+
   @ApiProperty({ nullable: true, example: null })
   imageUrl!: string | null;
 
@@ -42,6 +48,7 @@ export class ProductResponseDto {
     dto.description = product.description;
     dto.priceCents = product.priceCents;
     dto.currency = product.currency;
+    dto.stockQuantity = product.stockQuantity;
     dto.imageUrl = product.imageUrl;
     dto.isActive = product.isActive;
     dto.categoryId = product.categoryId;

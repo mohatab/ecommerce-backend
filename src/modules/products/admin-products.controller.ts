@@ -19,6 +19,7 @@ import { Role } from '@prisma/client';
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
+import { AdjustStockDto } from './dto/adjust-stock.dto';
 import { ProductResponseDto } from './dto/product-response.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 
@@ -57,6 +58,7 @@ export class AdminProductsController {
         currency: dto.currency ?? 'USD',
         imageUrl: dto.imageUrl,
         categoryId: dto.categoryId,
+        stockQuantity: dto.stockQuantity ?? 0,
       }),
     );
   }
@@ -102,5 +104,35 @@ export class AdminProductsController {
   @ApiResponse({ status: 404, description: 'No product with that id' })
   async deactivate(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
     await this.productsService.deactivate(id);
+  }
+
+  @Post(':id/stock-adjustments')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Adjust stock by a relative amount',
+    description:
+      'Applies a signed delta. Relative rather than absolute so a concurrent ' +
+      'sale cannot be silently overwritten. Returns the product with its new ' +
+      'stock level, which a relative operation makes otherwise unguessable.',
+  })
+  @ApiResponse({ status: 200, description: 'Adjusted' })
+  @ApiResponse({ status: 400, description: 'Validation failed' })
+  @ApiResponse({ status: 401, description: 'Missing or invalid token' })
+  @ApiResponse({
+    status: 403,
+    description: 'Authenticated but not an administrator',
+  })
+  @ApiResponse({ status: 404, description: 'No product with that id' })
+  @ApiResponse({
+    status: 409,
+    description: 'The adjustment would take stock below zero',
+  })
+  async adjustStock(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AdjustStockDto,
+  ): Promise<ProductResponseDto> {
+    return ProductResponseDto.from(
+      await this.productsService.adjustStock(id, dto.delta),
+    );
   }
 }

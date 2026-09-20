@@ -20,6 +20,8 @@ model User {
   createdAt     DateTime       @default(now()) @map("created_at")
   updatedAt     DateTime       @updatedAt @map("updated_at")
   refreshTokens RefreshToken[]
+  cart          Cart?
+  orders        Order[]
 
   @@map("users")
 }
@@ -52,19 +54,88 @@ model Category {
 }
 
 model Product {
-  id          String   @id @default(uuid(7))
-  name        String
-  description String
-  priceCents  Int      @map("price_cents")
-  currency    String   @default("USD")
-  imageUrl    String?  @map("image_url")
-  isActive    Boolean  @default(true) @map("is_active")
-  categoryId  String   @map("category_id")
-  category    Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id            String      @id @default(uuid(7))
+  name          String
+  description   String
+  priceCents    Int         @map("price_cents")
+  currency      String      @default("USD")
+  stockQuantity Int         @default(0) @map("stock_quantity")
+  imageUrl      String?     @map("image_url")
+  isActive      Boolean     @default(true) @map("is_active")
+  categoryId    String      @map("category_id")
+  category      Category    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
 
   @@index([categoryId])
   @@index([isActive, createdAt])
   @@map("products")
+}
+
+enum OrderStatus {
+  PENDING
+  CANCELLED
+}
+
+model Cart {
+  id        String     @id @default(uuid(7))
+  userId    String     @unique @map("user_id")
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     CartItem[]
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  @@map("carts")
+}
+
+model CartItem {
+  id        String   @id @default(uuid(7))
+  cartId    String   @map("cart_id")
+  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId String   @map("product_id")
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  quantity  Int
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([cartId, productId])
+  @@index([productId])
+  @@map("cart_items")
+}
+
+model Order {
+  id             String      @id @default(uuid(7))
+  userId         String      @map("user_id")
+  user           User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  status         OrderStatus @default(PENDING)
+  totalCents     Int         @map("total_cents")
+  currency       String
+  idempotencyKey String      @map("idempotency_key")
+  cancelledAt    DateTime?   @map("cancelled_at")
+  items          OrderItem[]
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, createdAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id             String   @id @default(uuid(7))
+  orderId        String   @map("order_id")
+  order          Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId      String   @map("product_id")
+  product        Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  productName    String   @map("product_name")
+  unitPriceCents Int      @map("unit_price_cents")
+  quantity       Int
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@unique([orderId, productId])
+  @@index([productId])
+  @@map("order_items")
 }
