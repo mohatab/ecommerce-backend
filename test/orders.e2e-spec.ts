@@ -80,22 +80,35 @@ describe('Orders (e2e)', () => {
     const product = await createProduct(prisma, category.id);
     const stranger = await createUser(prisma);
 
-    const first = await createOrder(prisma, userId, [
-      {
-        productId: product.id,
-        productName: product.name,
-        unitPriceCents: product.priceCents,
-        quantity: 1,
-      },
-    ]);
-    const second = await createOrder(prisma, userId, [
-      {
-        productId: product.id,
-        productName: product.name,
-        unitPriceCents: product.priceCents,
-        quantity: 2,
-      },
-    ]);
+    // createdAt is pinned rather than relying on wall-clock gaps: the column
+    // is TIMESTAMP(3), so two back-to-back inserts can share a millisecond
+    // and "newest first" would otherwise be a timing coin-flip.
+    const first = await createOrder(
+      prisma,
+      userId,
+      [
+        {
+          productId: product.id,
+          productName: product.name,
+          unitPriceCents: product.priceCents,
+          quantity: 1,
+        },
+      ],
+      { createdAt: new Date('2026-09-16T10:00:00.000Z') },
+    );
+    const second = await createOrder(
+      prisma,
+      userId,
+      [
+        {
+          productId: product.id,
+          productName: product.name,
+          unitPriceCents: product.priceCents,
+          quantity: 2,
+        },
+      ],
+      { createdAt: new Date('2026-09-16T11:00:00.000Z') },
+    );
     await createOrder(prisma, stranger.id, [
       {
         productId: product.id,
@@ -114,6 +127,37 @@ describe('Orders (e2e)', () => {
     expect(body.meta.total).toBe(2);
     expect(body.data.map((order) => order.id)).toEqual([second.id, first.id]);
     expect(body.data[0].items[0].lineTotalCents).toBe(product.priceCents * 2);
+  });
+
+  it('breaks a same-millisecond createdAt tie by id, descending', async () => {
+    const category = await createCategory(prisma);
+    const product = await createProduct(prisma, category.id);
+    const sameInstant = new Date('2026-09-16T12:00:00.000Z');
+
+    const line = {
+      productId: product.id,
+      productName: product.name,
+      unitPriceCents: product.priceCents,
+      quantity: 1,
+    };
+    const a = await createOrder(prisma, userId, [line], {
+      createdAt: sameInstant,
+    });
+    const b = await createOrder(prisma, userId, [line], {
+      createdAt: sameInstant,
+    });
+
+    const response = await request(app.getHttpServer())
+      .get('/api/v1/orders')
+      .set('Authorization', auth())
+      .expect(200);
+
+    const body = response.body as OrderListResponseBody;
+    // With createdAt tied, the id tiebreaker is the only thing making this
+    // deterministic: without it Postgres may return either order.
+    expect(body.data.map((order) => order.id)).toEqual(
+      [a.id, b.id].sort().reverse(),
+    );
   });
 
   it('paginates', async () => {

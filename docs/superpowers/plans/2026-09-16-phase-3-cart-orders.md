@@ -3765,7 +3765,7 @@ EOF
 After the Phase 2 section, add a `### Cart, orders, and checkout (Phase 3 — implemented)` block covering, in the voice of the existing entries (each point stating what breaks if it is changed):
 
 - Stock decrement is a conditional `updateMany` whose predicate travels with the write; never a read, a check, then an update. Same idiom as `RefreshTokenService.rotate()`.
-- Product row locks are taken in ascending `productId` order in checkout and cancel; unsorted locks deadlock on opposing carts.
+- Product row locks are taken in ascending `productId` order in checkout and cancel; unsorted locks are the classic deadlock shape on opposing carts, and sorted acquisition rules out hold-and-wait structurally. State it as required discipline, not as a proven-by-test mechanism — Step 12's control never reproduced a deadlock (spec §11).
 - Prices are snapshotted **after** the locks are held, never before.
 - The `Cart` row exists to be locked: every cart mutation and every checkout takes it. Deleting the model to "simplify" reopens one-cart-two-orders.
 - The idempotency lookup lives **inside** the transaction, after the lock; moving it earlier makes a concurrent replay return a spurious 409.

@@ -66,7 +66,9 @@ describe('OrdersService', () => {
         where: { userId: 'user-1' },
         skip: 10,
         take: 10,
-        orderBy: { createdAt: 'desc' },
+        // Tiebroken by id: without it, same-millisecond orders come back in
+        // an arbitrary order and can repeat or vanish across pages.
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         include: { items: true },
       });
       expect(prisma.order.count.mock.calls[0][0]).toEqual({

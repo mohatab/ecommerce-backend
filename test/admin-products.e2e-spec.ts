@@ -159,6 +159,40 @@ describe('admin products (e2e)', () => {
       expect(created.isActive).toBe(true);
     });
 
+    it('persists a supplied stockQuantity instead of the 0 default', async () => {
+      const category = await createCategory(prisma);
+      const token = await adminToken();
+
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/admin/products')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ ...body(category.id), stockQuantity: 7 })
+        .expect(201);
+
+      const created = response.body as ProductItem;
+      expect(created.stockQuantity).toBe(7);
+
+      // Read it back through the public catalog too, so the assertion covers
+      // what was stored and not just what the create handler echoed.
+      const fetched = await request(app.getHttpServer())
+        .get(`/api/v1/products/${created.id}`)
+        .expect(200);
+      expect((fetched.body as ProductItem).stockQuantity).toBe(7);
+    });
+
+    it('defaults stockQuantity to 0 when it is omitted', async () => {
+      const category = await createCategory(prisma);
+      const token = await adminToken();
+
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/admin/products')
+        .set('Authorization', `Bearer ${token}`)
+        .send(body(category.id))
+        .expect(201);
+
+      expect((response.body as ProductItem).stockQuantity).toBe(0);
+    });
+
     it('returns 409 for a well-formed but unknown categoryId', async () => {
       const token = await adminToken();
 

@@ -117,20 +117,41 @@ export class CartService {
     return cart;
   }
 
-  /** Idempotent: removing an absent line, or acting on a user with no cart,
-   *  is a no-op rather than a 404. */
+  /**
+   * Idempotent: removing an absent line, or acting on a user with no cart,
+   * is a no-op rather than a 404.
+   *
+   * Takes the cart lock like every other cart mutation. The two-operation
+   * race this closes (checkout reads the line, DELETE commits, checkout
+   * still orders it) is linearizable on its own — it is equivalent to the
+   * serial history "checkout, then DELETE deleted nothing" — so this is a
+   * uniformity and robustness change, not a bug fix. What it does buy: with
+   * a third concurrent reader, the unlocked version admitted a history with
+   * no equivalent serial order (a GET between DELETE's 204 and checkout's
+   * commit sees the line gone, yet the order still contains it), and it
+   * makes "every cart mutation takes the cart lock" true without exception.
+   *
+   * The no-cart early return stays deliberately: `lockForUpdate` upserts, so
+   * locking unconditionally would have DELETE create a `carts` row for a
+   * user who never had one, against §6.2's "a read/no-op must not write".
+   * It races nothing — with no cart there is no line to delete, and a
+   * concurrent first write can only add a line this call legitimately did
+   * not see (serial: DELETE, then the write).
+   */
   async removeItem(userId: string, productId: string): Promise<void> {
-    const cart = await this.prisma.cart.findUnique({
+    const existing = await this.prisma.cart.findUnique({
       where: { userId },
       select: { id: true },
     });
 
-    if (!cart) {
+    if (!existing) {
       return;
     }
 
-    await this.prisma.cartItem.deleteMany({
-      where: { cartId: cart.id, productId },
+    await this.prisma.$transaction(async (tx) => {
+      const cart = await this.lockForUpdate(tx, userId);
+
+      await tx.cartItem.deleteMany({ where: { cartId: cart.id, productId } });
     });
   }
 }

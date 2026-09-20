@@ -91,8 +91,10 @@ Two Prisma codes are left **deliberately unmapped**:
 
 - `P2028` (transaction timeout / pool exhaustion) — a saturation signal. A 500
   with a logged stack is the correct response; a friendly 4xx would hide load.
-- `P2034` (write conflict / deadlock) — unreachable given the lock ordering in
-  §5.4. If it ever appears, it is a bug in that ordering and must be loud.
+- `P2034` (write conflict / deadlock) — expected to be unreachable given the
+  lock ordering in §5.4, though that expectation rests on the structural
+  argument in §5.4 rather than on a reproduced control (§11, C3). If it ever
+  appears, it is a bug in that ordering and must be loud.
 
 A `CHECK` constraint violation is likewise a 500 by design (§4.1).
 
@@ -401,7 +403,19 @@ The `update` branch takes a row lock held until commit. Three effects:
 
 1. **Concurrent checkouts by one user serialise.** The second sees the committed
    result of the first, rather than re-reading the same cart.
-2. **Cart edits cannot interleave** between reading the cart and clearing it.
+2. **Cart edits serialise against checkout.** `PUT /cart/items/:productId` and
+   `DELETE /cart/items/:productId` both take this lock, so neither can commit
+   between checkout reading the cart and clearing it — an edit racing a
+   checkout waits for the checkout to commit and then applies to the emptied
+   cart. This says nothing about `GET /cart`, which takes no lock and reads
+   the last committed state by design. The original wording ("cart edits
+   cannot interleave") over-claimed while `DELETE` ran unlocked: it deleted
+   its line in autocommit, so a checkout that had already read the line still
+   ordered it. That two-operation outcome was linearizable — indistinguishable
+   from the serial history "checkout ran, then `DELETE` deleted nothing" — but
+   adding a concurrent `GET` produced a history with no equivalent serial
+   order, and it left one cart mutation outside the rule. `DELETE` now takes
+   the lock, which is what makes the claim above true as stated.
 3. **First-cart creation does not race.** Prisma compiles this shape to a native
    `INSERT … ON CONFLICT`, so two first-time requests do not produce `P2002`.
    This is an assumption about Prisma's query compilation, so it is **verified by
@@ -518,9 +532,15 @@ solely by the `isActive` predicate inside the decrement (§5.3).
 
 All paths take product locks in the same order, so no cycle exists. Checkout
 never locks an existing order row (it inserts one), so checkout and cancel cannot
-form a cycle either. The sort is not cosmetic: without it, carts `[A, B]` and
-`[B, A]` deadlock, and PostgreSQL resolves that by aborting one transaction with
-a 500. Test C3 covers it.
+form a cycle either. The sort is not cosmetic: unsorted acquisition is the
+classic deadlock shape, carts `[A, B]` and `[B, A]` waiting on each other until
+PostgreSQL aborts one with a 500. Sorting removes the possibility structurally —
+hold-and-wait cannot form a cycle when every transaction requests product rows
+in the same order — so the ordering is **required discipline**, justified by
+PostgreSQL's row-lock semantics rather than proven by test. Test C3 exercises
+the opposing-cart scenario and passes, but it did **not** reproduce a deadlock
+when the ordering was removed (§11), so it is not evidence that the sort is the
+mechanism preventing one.
 
 ### 5.5 Checkout algorithm
 
@@ -617,6 +637,13 @@ with `@ApiTags`, `@ApiOperation` and `@ApiResponse`, per `CLAUDE.md`.
 |---|---|---|
 | `POST` | `/api/v1/orders` | Checkout. Requires `Idempotency-Key`. 201 new, 200 replayed. |
 | `GET` | `/api/v1/orders` | The caller's orders only. `PaginationQueryDto`, newest first, `PaginatedDto` + `@ApiPaginatedResponse(OrderResponseDto)`. |
+
+"Newest first" is `orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]`. The `id`
+tiebreaker is load-bearing, not decoration: `created_at` is `TIMESTAMP(3)`, so
+two orders placed in the same millisecond tie, and an untiebroken sort leaves
+their relative position arbitrary — which also lets a row repeat on one page
+and vanish from the next. Ids are `uuid(7)` and therefore time-ordered, so
+`id desc` agrees with `createdAt desc` and can never contradict it.
 | `GET` | `/api/v1/orders/:id` | The caller's order. Another user's → 404. |
 | `POST` | `/api/v1/orders/:id/cancel` | Idempotent. |
 
@@ -750,7 +777,7 @@ pass for the wrong reason.
 |---|---|---|---|
 | C1 | Stock 5; 25 users each with quantity 1 check out simultaneously | exactly 5 × 201, 20 × 409; stock 0; 5 orders; the 20 losers' carts intact; conservation | read → check in JS → absolute `update`. Yields **more than 5 × 201** with stock ≥ 0, so the `CHECK` cannot mask it. |
 | C2 | Stock 10; 10 users with quantity 3 | exactly 3 × 201; stock 1; conservation | same |
-| C3 | A and B at stock 50; 20 users, half `[A,B]`, half `[B,A]` | 20 × 201; zero 500s; A = B = 30 | remove the `productId` sort → deadlock. Timing-dependent, so **attempted and recorded**, not a pass/fail gate. |
+| C3 | A and B at stock 50; 20 users, half `[A,B]`, half `[B,A]` | 20 × 201; zero 500s; A = B = 30 | remove the `productId` sort, *aiming* to provoke a deadlock. Timing-dependent, so **attempted and recorded**, not a pass/fail gate — and in fact it never reproduced one (§11). |
 | C4 | One user, **same key**, 10 parallel checkouts | 1 × 201, 9 × 200, all the same `order.id`; one order row; stock decremented once | idempotency lookup moved before the lock → losers get 409 "Cart is empty" |
 | C5 | One user, **different keys**, 10 parallel checkouts | 1 × 201, 9 × 409 "Cart is empty"; exactly one order | remove the cart lock → multiple orders from one cart |
 | C6 | 10 parallel cancels of one order | 10 × 200; stock restored **exactly once**; conservation | cancel without the `status: PENDING` predicate |
@@ -828,7 +855,8 @@ suite is never mistaken for a concurrency proof.
 
 ### 8.7 Gate
 
-`npm run lint`, `npm run build`, `npm test`, and — because everything here is
+`npm run lint:ci` (not `npm run lint` — its `--fix` repairs a violation instead
+of reporting it), `npm run build`, `npm test`, and — because everything here is
 DB-dependent — `npm run test:e2e`, all green before any task is done.
 
 ---
@@ -933,7 +961,7 @@ unproven, and the phase is not done.
    produce exactly one order.
 7. Order line prices and names are immutable against later catalog edits.
 8. No external I/O occurs inside the checkout transaction.
-9. `npm run lint`, `npm run build`, `npm test`, `npm run test:e2e` green; CI
+9. `npm run lint:ci`, `npm run build`, `npm test`, `npm run test:e2e` green; CI
    green.
 10. §11 is complete, and §10's documentation updates have landed.
 11. No payment code, no Redis, no BullMQ, no background job, no admin order

@@ -24,7 +24,12 @@ export class OrdersService {
         where,
         skip: query.skip,
         take: query.limit,
-        orderBy: { createdAt: 'desc' },
+        // `created_at` is TIMESTAMP(3), so two orders placed in the same
+        // millisecond tie and the row order becomes arbitrary — which also
+        // lets a row repeat or vanish across pages. `id` breaks the tie
+        // deterministically: ids are uuid(7), time-ordered, so `id desc`
+        // agrees with `createdAt desc` and never contradicts it.
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         include: { items: true },
       }),
       this.prisma.order.count({ where }),

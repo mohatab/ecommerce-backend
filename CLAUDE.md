@@ -38,7 +38,7 @@ A production-grade e-commerce backend, built as a portfolio project for a backen
 ## Coding Conventions
 
 - Strict TypeScript (`strict: true`) everywhere. Avoid `any`; if unavoidable, comment why.
-- ESLint + Prettier are enforced — `npm run lint` must be clean before a change is considered done.
+- ESLint + Prettier are enforced — `npm run lint:ci` must be clean before a change is considered done (`lint`'s `--fix` would repair the violation instead of reporting it).
 - Request input is validated with `class-validator` DTOs — never trust a raw request body.
 - Public methods have explicit return types.
 - No unused locals/parameters (enforced by `tsconfig.json`).
@@ -84,7 +84,7 @@ A production-grade e-commerce backend, built as a portfolio project for a backen
 ### Cart, orders, and checkout (Phase 3 — implemented)
 
 - **Stock decrement is a conditional `updateMany` whose predicate travels with the write, in `ProductsService.decrementStock()`.** Never a read, a check, then an update — same idiom as `RefreshTokenService.rotate()`. PostgreSQL re-evaluates the `WHERE` (`isActive: true`, `stockQuantity: { gte: quantity }`) against the committed row before writing, so a decrement racing past a concurrent one on stale data simply matches zero rows instead of overselling.
-- **Product row locks are taken in ascending `productId` order**, in both `CheckoutService.checkout()` and `OrdersService.cancel()`. Unsorted locks deadlock when two carts hold the same two products in opposite order. `checkout()` re-sorts `sortedItems` itself rather than trusting `CartService.listItemsForCheckout()`'s own `orderBy` — the lock order must not depend on a caller remembering to ask for one.
+- **Product row locks are taken in ascending `productId` order**, in both `CheckoutService.checkout()` and `OrdersService.cancel()`. Unsorted locks are the classic deadlock shape — two carts holding the same two products in opposite order — and sorted acquisition makes hold-and-wait impossible by construction; that is a structural argument from PostgreSQL row-lock semantics, **not** a result this harness reproduced (see the C3 entry below). `checkout()` re-sorts `sortedItems` itself rather than trusting `CartService.listItemsForCheckout()`'s own `orderBy` — the lock order must not depend on a caller remembering to ask for one.
 - **Prices and names are snapshotted only after every product lock in the order is held** — `ProductsService.findManyForSnapshot()` runs after the decrement loop in `checkout()`, never before. Reading prices first would let an admin's committed price change land between the read and the order insert.
 - **The `Cart` row exists to be locked.** `CartService.lockForUpdate()` — a `cart.upsert` whose `update` branch takes the row lock — runs first in every cart mutation and every checkout. Deleting the model to "simplify" (folding it into `CartItem.userId`) reopens one-cart-two-orders: two concurrent checkouts by the same user with different idempotency keys would both read the same items and both decrement stock.
 - **The idempotency lookup lives inside the transaction, after the cart lock.** `CheckoutService.checkout()` runs `tx.order.findUnique({ userId_idempotencyKey })` only once the cart row lock is held. Moving it earlier makes a concurrent replay see the already-cleared cart and wrongly return 409 "Cart is empty" instead of replaying the committed order.
@@ -164,7 +164,7 @@ These were each established empirically; a future session will otherwise redisco
 
 1. Confirm which phase a change belongs to before writing code for it. If unclear, ask rather than assume.
 2. Never hardcode a secret; if a new env var is needed, add it to both `.env.example` and the Joi schema in `src/config/env.validation.ts`.
-3. Before calling a change done: `npm run lint`, `npm run build`, `npm test` must pass; run `npm run test:e2e` too when the change touches anything DB-dependent.
+3. Before calling a change done: `npm run lint:ci`, `npm run build`, `npm test` must pass; run `npm run test:e2e` too when the change touches anything DB-dependent.
 4. Do not loosen `tsconfig.json` strictness or disable an ESLint rule to make an error go away — fix the underlying issue.
 5. Stay inside the current task's module/domain — don't touch unrelated modules "while you're in there."
 6. Update this file when architecture, conventions, or constraints actually change.
