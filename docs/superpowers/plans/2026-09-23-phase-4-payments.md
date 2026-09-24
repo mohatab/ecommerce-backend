@@ -225,7 +225,9 @@ model PaymentEvent {
 
 **Do not add any other field.** Spec §11.2/§11.3 enumerate what is omitted and why: no `amountCents`, no `currency`, no `clientSecret`, no `provider`, no `attemptCount`, no `rawProviderPayload`, no `idempotencyKey` on `Payment`; no `receivedAt`, no `payload`, no `orderId` FK, no `processedAt`/`status` on `PaymentEvent`.
 
-**No `@@index` beyond the two `@@unique` constraints.** They create every index Phase 4 queries need.
+**No `@@index` beyond the three `@@unique` constraints** (`Payment.orderId`,
+`Payment.providerPaymentId`, `PaymentEvent.providerEventId`). They create every
+index Phase 4 queries need.
 
 - [ ] **Step 2: Generate the migration**
 
@@ -345,6 +347,12 @@ In `test/helpers/assert-stock-conserved.ts`, change the aggregate's `where` and 
 
 - [ ] **Step 8: Add the three environment variables**
 
+> **Order correction (applied during execution):** write **Step 10's config unit
+> tests first**, run them, and watch them fail — then apply this step. As numbered,
+> Step 8 implements before Step 10 tests, which makes Step 11's "watch them fail"
+> impossible. The same code ships; only the order of observation changes.
+
+
 In `src/config/configuration.ts`, extend the `AppConfig` interface:
 
 ```ts
@@ -359,10 +367,13 @@ and the factory, after the `admin` block:
 
 ```ts
   payments: {
-    // Joi has already restricted this to 'stripe' | 'fake' and forbidden
-    // 'fake' under NODE_ENV=production. The cast records that; it does not
-    // create the guarantee.
-    provider: (process.env.PAYMENT_PROVIDER ?? 'fake') as 'stripe' | 'fake',
+    // NO DEFAULT, by spec §12.1. Defaulting to 'fake' would silently pick the
+    // one value production forbids if this factory were ever reached without
+    // Joi — a script importing it directly, or a future `ignoreEnvVars` —
+    // which is precisely the scenario requireEnv() exists for (see its doc
+    // comment above). Joi has already restricted the value set and banned
+    // 'fake' in production; the cast records that, it does not create it.
+    provider: requireEnv('PAYMENT_PROVIDER') as 'stripe' | 'fake',
     // Only the Stripe adapter needs it; Joi requires it when provider=stripe.
     apiKey: process.env.PAYMENT_API_KEY,
     // Same class of value as JWT_SECRET, so it uses the same helper for the
@@ -384,7 +395,13 @@ In `src/config/env.validation.ts`, add to the schema:
     .required()
     .when('NODE_ENV', {
       is: 'production',
-      then: Joi.valid('stripe'),
+      // Joi.override is LOAD-BEARING. A `then` branch is CONCATENATED onto the
+      // base schema, so a bare `Joi.valid('stripe')` merely re-adds an
+      // already-allowed value and leaves `fake` just as valid under
+      // production — the exact boot this rule exists to abort. Verified
+      // against Joi 18.2.3; the env.validation.spec.ts production case is
+      // what catches a regression here.
+      then: Joi.valid(Joi.override, 'stripe'),
     }),
   PAYMENT_API_KEY: Joi.string().when('PAYMENT_PROVIDER', {
     is: 'stripe',
@@ -403,7 +420,10 @@ In `.env.example`, append:
 # e2e suite. Boot ABORTS if it is used with NODE_ENV=production.
 PAYMENT_PROVIDER=fake
 # Required only when PAYMENT_PROVIDER=stripe. Use a test-mode key.
-PAYMENT_API_KEY=
+# Left COMMENTED OUT, not empty: Joi rejects an empty string, so an
+# uncommented `PAYMENT_API_KEY=` makes a verbatim copy of this file abort boot
+# with "is not allowed to be empty".
+# PAYMENT_API_KEY=
 # Webhook HMAC secret, used by whichever adapter is selected. At least 16
 # characters; boot aborts if it is missing or empty.
 PAYMENT_WEBHOOK_SECRET=change-me-to-a-random-webhook-signing-secret
