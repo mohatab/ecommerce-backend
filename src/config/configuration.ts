@@ -18,6 +18,11 @@ export interface AppConfig {
     email: string | undefined;
     password: string | undefined;
   };
+  payments: {
+    provider: 'stripe' | 'fake';
+    apiKey: string | undefined;
+    webhookSecret: string;
+  };
 }
 
 /**
@@ -66,5 +71,17 @@ export default (): AppConfig => ({
     // either is missing. They are never read on any request path.
     email: process.env.ADMIN_EMAIL,
     password: process.env.ADMIN_PASSWORD,
+  },
+  payments: {
+    // Joi has already restricted this to 'stripe' | 'fake' and forbidden
+    // 'fake' under NODE_ENV=production. The cast records that; it does not
+    // create the guarantee.
+    provider: (process.env.PAYMENT_PROVIDER ?? 'fake') as 'stripe' | 'fake',
+    // Only the Stripe adapter needs it; Joi requires it when provider=stripe.
+    apiKey: process.env.PAYMENT_API_KEY,
+    // Same class of value as JWT_SECRET, so it uses the same helper for the
+    // same reason: an empty HMAC key does not fail loudly, it verifies
+    // happily, and anyone who guesses it can forge paid-order events.
+    webhookSecret: requireEnv('PAYMENT_WEBHOOK_SECRET'),
   },
 });

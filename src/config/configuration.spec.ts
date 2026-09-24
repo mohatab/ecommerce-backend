@@ -5,6 +5,11 @@ describe('configuration', () => {
 
   beforeEach(() => {
     process.env = { ...originalEnv };
+    // PAYMENT_WEBHOOK_SECRET has no default — `configuration()` throws without
+    // it, exactly like JWT_SECRET. Unit tests never load `.env`, so every test
+    // below that is not *about* the webhook secret needs a baseline value or
+    // it would fail for a reason it is not testing.
+    process.env.PAYMENT_WEBHOOK_SECRET = 'w'.repeat(20);
   });
 
   afterAll(() => {
@@ -76,5 +81,26 @@ describe('configuration', () => {
 
     expect(config.admin.email).toBeUndefined();
     expect(config.admin.password).toBeUndefined();
+  });
+
+  it('maps the payments section from the environment', () => {
+    process.env.JWT_SECRET = 'c'.repeat(32);
+    process.env.PAYMENT_PROVIDER = 'stripe';
+    process.env.PAYMENT_API_KEY = 'sk_test_example';
+    process.env.PAYMENT_WEBHOOK_SECRET = 'w'.repeat(20);
+
+    const config = configuration();
+
+    expect(config.payments.provider).toBe('stripe');
+    expect(config.payments.apiKey).toBe('sk_test_example');
+    expect(config.payments.webhookSecret).toBe('w'.repeat(20));
+  });
+
+  it('refuses to start when PAYMENT_WEBHOOK_SECRET is missing', () => {
+    process.env.JWT_SECRET = 'd'.repeat(32);
+    process.env.PAYMENT_PROVIDER = 'fake';
+    delete process.env.PAYMENT_WEBHOOK_SECRET;
+
+    expect(() => configuration()).toThrow(/PAYMENT_WEBHOOK_SECRET/);
   });
 });

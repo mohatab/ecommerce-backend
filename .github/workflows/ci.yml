@@ -66,6 +66,11 @@ jobs:
       # No .env exists in CI, so every Joi-required variable must be set here.
       # A throwaway value: CI signs and verifies within a single run.
       JWT_SECRET: ci-only-secret-not-used-outside-continuous-integration
+      # Phase 4: the app boots with Joi validation in every e2e suite. `fake`
+      # is the DI-selected provider for CI — no Stripe credentials exist here
+      # and none are needed. PAYMENT_API_KEY is deliberately unset.
+      PAYMENT_PROVIDER: fake
+      PAYMENT_WEBHOOK_SECRET: ci-only-webhook-secret-not-used-outside-ci
 
     steps:
       - uses: actions/checkout@v5
@@ -136,6 +141,11 @@ jobs:
       ADMIN_EMAIL: ci-admin@example.test
       ADMIN_PASSWORD: CiBootstrap1234!
       PGPASSWORD: postgres
+      # `node dist/scripts/bootstrap-admin.js` boots the full AppModule, so Joi
+      # validation and configuration() both run here too — without these the
+      # compiled bootstrap aborts before it reaches the database.
+      PAYMENT_PROVIDER: fake
+      PAYMENT_WEBHOOK_SECRET: ci-only-webhook-secret-not-used-outside-ci
 
     steps:
       - uses: actions/checkout@v5

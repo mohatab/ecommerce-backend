@@ -37,4 +37,27 @@ export const envValidationSchema = Joi.object({
     .email({ tlds: { allow: false } })
     .optional(),
   ADMIN_PASSWORD: Joi.string().min(8).max(128).optional(),
+  // Required with no default: a fake provider silently marking orders paid in
+  // production is the worst realistic misconfiguration in this phase, so the
+  // choice is always explicit. Under NODE_ENV=production only 'stripe' is
+  // accepted, and boot ABORTS otherwise — enforced here, not by convention.
+  PAYMENT_PROVIDER: Joi.string()
+    .valid('stripe', 'fake')
+    .required()
+    .when('NODE_ENV', {
+      is: 'production',
+      // Joi.override is load-bearing: a `then` branch is CONCATENATED onto the
+      // base schema, so a bare `Joi.valid('stripe')` would ADD 'stripe' to the
+      // already-allowed set and leave 'fake' just as valid under production.
+      // Verified empirically — without the override, NODE_ENV=production with
+      // PAYMENT_PROVIDER=fake validates clean, which is precisely the boot this
+      // rule exists to abort.
+      then: Joi.valid(Joi.override, 'stripe'),
+    }),
+  PAYMENT_API_KEY: Joi.string().when('PAYMENT_PROVIDER', {
+    is: 'stripe',
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  PAYMENT_WEBHOOK_SECRET: Joi.string().min(16).required(),
 });
