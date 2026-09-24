@@ -168,6 +168,57 @@ describe('catalog factories', () => {
       expect(event.id).toMatch(/^[0-9a-f-]{36}$/);
     });
 
+    // Spec §11.2 calls both of these load-bearing, and neither is exercised by
+    // anything else yet: one payment per order is what keeps a replayed
+    // initiation idempotent, and Restrict is what stops an order deletion
+    // silently taking the payment record with it. The rejection is asserted,
+    // not a particular Prisma code — the mapping to a status belongs to
+    // HttpExceptionFilter, not here.
+    it('refuses a second payment for the same order (Payment.orderId is unique)', async () => {
+      const user = await createUser(prisma);
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id);
+      const order = await createOrder(prisma, user.id, [
+        {
+          productId: product.id,
+          productName: product.name,
+          unitPriceCents: product.priceCents,
+          quantity: 1,
+        },
+      ]);
+
+      await createPayment(prisma, order.id);
+
+      await expect(createPayment(prisma, order.id)).rejects.toThrow();
+    });
+
+    it('refuses to delete an order that has a payment (onDelete: Restrict)', async () => {
+      const user = await createUser(prisma);
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id);
+      const order = await createOrder(prisma, user.id, [
+        {
+          productId: product.id,
+          productName: product.name,
+          unitPriceCents: product.priceCents,
+          quantity: 1,
+        },
+      ]);
+
+      await createPayment(prisma, order.id);
+
+      await expect(
+        prisma.order.delete({ where: { id: order.id } }),
+      ).rejects.toThrow();
+
+      // Restrict, not Cascade: the payment must still be there afterwards.
+      const surviving = await prisma.payment.findUnique({
+        where: { orderId: order.id },
+      });
+
+      expect(surviving).not.toBeNull();
+    });
+
     // Pins the Phase 4 change to assertStockConserved. A PAID order's stock
     // was taken by checkout and is never given back, so the helper must keep
     // counting it as held. If PAID drops out of that sum the assertion below

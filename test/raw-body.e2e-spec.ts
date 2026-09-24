@@ -22,9 +22,11 @@ describe('Raw body construction seam (e2e)', () => {
   });
 
   // Byte-exactness is the whole point: this payload survives JSON.parse but
-  // NOT a parse/re-stringify round trip, because the key order and the
-  // spacing both change. A webhook HMAC over a re-serialised body would fail
-  // for every authentic event.
+  // NOT a parse/re-stringify round trip. JSON.stringify drops the two spaces
+  // after the comma and emits the escape `é` as the literal character
+  // `é`, so the bytes differ even though the parsed value is identical. A
+  // webhook HMAC over a re-serialised body would fail for every authentic
+  // event.
   const PAYLOAD = '{"b":1,  "a":"\\u00e9"}';
 
   it('exposes request.rawBody as a Buffer holding the exact bytes sent', async () => {

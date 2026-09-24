@@ -16,6 +16,9 @@ interface ValidatedEnv {
   JWT_SECRET: string;
   JWT_ACCESS_TTL: string;
   JWT_REFRESH_TTL: string;
+  PAYMENT_PROVIDER: string;
+  PAYMENT_API_KEY?: string;
+  PAYMENT_WEBHOOK_SECRET: string;
 }
 
 function validate(env: Record<string, unknown>): {

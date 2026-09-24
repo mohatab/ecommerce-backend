@@ -73,10 +73,18 @@ export default (): AppConfig => ({
     password: process.env.ADMIN_PASSWORD,
   },
   payments: {
+    // No default (spec §12.1), for the reason requireEnv exists: Joi guarding
+    // the boot path is not the same as this factory being safe, and the paths
+    // Joi does not run — a script importing it directly, a future
+    // `ignoreEnvVars` — are exactly where a silent fallback would bite. The
+    // fallback that was here defaulted to 'fake', the one value production
+    // forbids, so an unset variable would have chosen a provider that marks
+    // orders paid without taking money. It throws instead.
+    //
     // Joi has already restricted this to 'stripe' | 'fake' and forbidden
     // 'fake' under NODE_ENV=production. The cast records that; it does not
     // create the guarantee.
-    provider: (process.env.PAYMENT_PROVIDER ?? 'fake') as 'stripe' | 'fake',
+    provider: requireEnv('PAYMENT_PROVIDER') as 'stripe' | 'fake',
     // Only the Stripe adapter needs it; Joi requires it when provider=stripe.
     apiKey: process.env.PAYMENT_API_KEY,
     // Same class of value as JWT_SECRET, so it uses the same helper for the
