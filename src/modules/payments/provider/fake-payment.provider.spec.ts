@@ -37,6 +37,22 @@ function eventPayload(overrides: Record<string, unknown> = {}): string {
 }
 
 /**
+ * AMOUNT_LIMITS is Partial<Record<...>> by design — an absent currency is not
+ * payable — so even the one supported entry arrives as AmountLimits |
+ * undefined and has to be narrowed once, here, rather than asserted away at
+ * each use.
+ */
+function usdLimits(): AmountLimits {
+  const limits = AMOUNT_LIMITS.USD;
+
+  if (limits === undefined) {
+    throw new Error('AMOUNT_LIMITS.USD must be defined');
+  }
+
+  return limits;
+}
+
+/**
  * Mirrors the three rules in spec §5.4 that PaymentsService will apply in
  * Task 4. It lives here so the BOUNDARY semantics of AMOUNT_LIMITS are pinned
  * by the phase that defines the constant; the service's own copy is tested
@@ -219,6 +235,71 @@ describe('FakePaymentProvider', () => {
 
       expect(next.amountMinorUnits).toBe(1000);
     });
+
+    // The mismatch control's lifetime is "the next createPayment CALL", not
+    // "the next intent created" — so a retention replay consumes it and leaves
+    // nothing armed. Reading it after the replay branch instead would make
+    // this last create report 999.
+    it('consumes the mismatch control on a retention replay, arming nothing', async () => {
+      await provider.createPayment(input);
+
+      provider.mismatchNextCreateAmount(999);
+
+      const replay = await provider.createPayment(input);
+
+      expect(replay.amountMinorUnits).toBe(1000);
+
+      const later = await provider.createPayment({
+        ...input,
+        idempotencyKey: 'order-2',
+      });
+
+      expect(later.amountMinorUnits).toBe(1000);
+    });
+
+    // ProviderPayment.currency is documented "Uppercase ISO-4217. Adapters
+    // normalise" — the fake must honour its own port's contract, not lean on
+    // every caller happening to pass uppercase today.
+    it('normalises the currency to uppercase', async () => {
+      const created = await provider.createPayment({
+        ...input,
+        currency: 'usd',
+      });
+
+      expect(created.currency).toBe('USD');
+      await expect(
+        provider.retrievePayment(created.providerPaymentId),
+      ).resolves.toMatchObject({ currency: 'USD' });
+    });
+
+    it('hands back a copy, so a caller cannot mutate the fake state', async () => {
+      const created = await provider.createPayment(input);
+
+      created.amountMinorUnits = 1;
+      created.clientSecret = 'leaked';
+
+      await expect(
+        provider.retrievePayment(created.providerPaymentId),
+      ).resolves.toMatchObject({
+        amountMinorUnits: 1000,
+        clientSecret: 'pi_fake_order-1_1_secret_1',
+      });
+
+      const replay = await provider.createPayment(input);
+
+      expect(replay.amountMinorUnits).toBe(1000);
+
+      // The retrieve path copies too.
+      const retrieved = await provider.retrievePayment(
+        created.providerPaymentId,
+      );
+
+      retrieved.amountMinorUnits = 2;
+
+      await expect(
+        provider.retrievePayment(created.providerPaymentId),
+      ).resolves.toMatchObject({ amountMinorUnits: 1000 });
+    });
   });
 
   describe('retrievePayment', () => {
@@ -251,12 +332,21 @@ describe('FakePaymentProvider', () => {
   });
 
   describe('verifyWebhook', () => {
-    // The constant-time property itself is NOT observable from a unit test:
-    // swapping timingSafeEqual for Buffer.equals leaves all of these green
-    // (recorded as a null result in the task report), and a wall-clock timing
-    // assertion is flaky in a JIT and proves little. This guards the one thing
-    // a future "simplification" would actually remove. Spec §6.4 names
-    // crypto.timingSafeEqual specifically.
+    // WHAT THIS PROVES, EXACTLY: that the literal text "timingSafeEqual(" is
+    // present in the provider source. Nothing more. It does NOT prove the call
+    // is on the comparison path, that it is reached, or that the comparison is
+    // constant-time — a comment containing that text satisfies it, and so does
+    // a dead call beside a Buffer.equals. Treat it as a tripwire against a
+    // wholesale deletion, never as a behavioural test.
+    //
+    // WHY IT IS THE BEST AVAILABLE: constant-time-ness is not observable from
+    // a unit test. Swapping timingSafeEqual for Buffer.equals leaves every
+    // behavioural test in this file green (recorded as a null result in the
+    // task report); jest.spyOn(crypto, 'timingSafeEqual') throws "Cannot
+    // redefine property" under ts-jest's CJS output; a wall-clock timing
+    // assertion is flaky in a JIT and would not establish the property anyway.
+    // Spec §6.4 names crypto.timingSafeEqual specifically, so the tripwire
+    // stays despite being weak.
     it('compares digests with crypto.timingSafeEqual', () => {
       const source = readFileSync(
         join(__dirname, 'fake-payment.provider.ts'),
@@ -375,14 +465,33 @@ describe('FakePaymentProvider', () => {
     it('rejects a missing or malformed signature header', () => {
       const payload = eventPayload();
       const body = Buffer.from(payload);
+      const malformed = 'Malformed signature header';
 
-      expect(() => provider.verifyWebhook(body, '')).toThrow();
-      expect(() => provider.verifyWebhook(body, 'not-hex')).toThrow();
-      expect(() => provider.verifyWebhook(body, 't=,v1=')).toThrow();
-      expect(() => provider.verifyWebhook(body, 'v1=deadbeef')).toThrow();
+      expect(() => provider.verifyWebhook(body, '')).toThrow(malformed);
+      expect(() => provider.verifyWebhook(body, 'not-hex')).toThrow(malformed);
+      expect(() => provider.verifyWebhook(body, 't=,v1=')).toThrow(malformed);
+      expect(() => provider.verifyWebhook(body, 'v1=deadbeef')).toThrow(
+        malformed,
+      );
       expect(() =>
         provider.verifyWebhook(body, `t=${Math.floor(Date.now() / 1000)}`),
-      ).toThrow();
+      ).toThrow(malformed);
+    });
+
+    // The header above parses: `t` is an integer and `v1` is lowercase hex, so
+    // it reaches the digest comparison — with a 4-character digest against a
+    // 64-character one. Without the length check in verifyWebhook,
+    // timingSafeEqual throws RangeError('Input buffers must have the same byte
+    // length') instead, which Task 5 would surface as an unmapped 500 where
+    // spec §8.5 requires 400 "Invalid signature". Deleting the guard must fail
+    // HERE, not in Task 5's e2e.
+    it('rejects a well-formed header carrying a wrong-LENGTH digest', () => {
+      const payload = eventPayload();
+      const header = `t=${Math.floor(Date.now() / 1000)},v1=abcd`;
+
+      expect(() =>
+        provider.verifyWebhook(Buffer.from(payload), header),
+      ).toThrow('Invalid signature');
     });
 
     // The signature binds the EXACT bytes, not the parsed object. This payload
@@ -415,7 +524,11 @@ describe('FakePaymentProvider', () => {
       ).toThrow('Malformed event payload');
     });
 
-    it('rejects correctly signed non-JSON', () => {
+    // Message-specific on purpose: a bare .toThrow() here passes on the RAW
+    // SyntaxError that an unguarded JSON.parse produces, which certifies the
+    // crash instead of the refusal — and that SyntaxError's message embeds a
+    // prefix of the attacker-supplied body.
+    it('rejects correctly signed non-JSON with the controlled refusal', () => {
       const payload = 'not json at all';
 
       expect(() =>
@@ -423,7 +536,7 @@ describe('FakePaymentProvider', () => {
           Buffer.from(payload),
           provider.signWebhook(payload),
         ),
-      ).toThrow();
+      ).toThrow('Malformed event payload');
     });
   });
 
@@ -437,15 +550,15 @@ describe('FakePaymentProvider', () => {
     it('admits the lower and upper bounds', () => {
       const limits = provider.amountLimits('USD');
 
-      expect(payable(limits, AMOUNT_LIMITS.USD.minMinorUnits)).toBe(true);
-      expect(payable(limits, AMOUNT_LIMITS.USD.maxMinorUnits)).toBe(true);
+      expect(payable(limits, usdLimits().minMinorUnits)).toBe(true);
+      expect(payable(limits, usdLimits().maxMinorUnits)).toBe(true);
     });
 
     it('refuses one minor unit outside each bound', () => {
       const limits = provider.amountLimits('USD');
 
-      expect(payable(limits, AMOUNT_LIMITS.USD.minMinorUnits - 1)).toBe(false);
-      expect(payable(limits, AMOUNT_LIMITS.USD.maxMinorUnits + 1)).toBe(false);
+      expect(payable(limits, usdLimits().minMinorUnits - 1)).toBe(false);
+      expect(payable(limits, usdLimits().maxMinorUnits + 1)).toBe(false);
     });
 
     it('returns null for a currency that is not payable in Phase 4', () => {
@@ -453,6 +566,24 @@ describe('FakePaymentProvider', () => {
       expect(provider.amountLimits('usd')).toBeNull();
       expect(provider.amountLimits('')).toBeNull();
       expect(payable(provider.amountLimits('EUR'), 1000)).toBe(false);
+    });
+
+    // The type-level half of the same guarantee, and the only mechanical guard
+    // on it: AMOUNT_LIMITS must be Partial<Record<...>>, so indexing it yields
+    // AmountLimits | undefined and the absent-currency path cannot be skipped
+    // by accident. Widening it back to Readonly<Record<string, AmountLimits>>
+    // makes the line below compile, which turns the @ts-expect-error into an
+    // unused-directive error — the negative control, verified. Note WHERE it
+    // fires: `npx tsc --noEmit -p tsconfig.json`, not jest. tsconfig sets
+    // isolatedModules, so ts-jest transpiles without type-checking, and
+    // tsconfig.build.json excludes *.spec.ts from `npm run build`. The runtime
+    // assertion is what jest can see; it shows what the widened type hides.
+    it('makes an unsupported currency undefined at the type level too', () => {
+      expect(AMOUNT_LIMITS.EUR).toBeUndefined();
+      expect(
+        // @ts-expect-error AMOUNT_LIMITS.EUR is possibly undefined
+        () => AMOUNT_LIMITS.EUR.minMinorUnits,
+      ).toThrow(TypeError);
     });
   });
 

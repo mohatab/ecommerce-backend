@@ -75,8 +75,15 @@ export interface AmountLimits {
  * provider rejection.
  *
  * A currency absent from this map is not payable in Phase 4 (422).
+ *
+ * The type is Partial<...>, NOT Record<string, AmountLimits>: this repo does
+ * not set noUncheckedIndexedAccess, so a plain Record would type
+ * AMOUNT_LIMITS['EUR'].minMinorUnits as a clean AmountLimits access and let it
+ * compile — while throwing TypeError at runtime for every currency but USD.
+ * Partial makes the indexed type AmountLimits | undefined, so the absent-
+ * currency path (spec §5.4: null -> 422) cannot be skipped by accident.
  */
-export const AMOUNT_LIMITS: Readonly<Record<string, AmountLimits>> = {
+export const AMOUNT_LIMITS: Readonly<Partial<Record<string, AmountLimits>>> = {
   USD: { minMinorUnits: 50, maxMinorUnits: 99_999_999 },
 };
 

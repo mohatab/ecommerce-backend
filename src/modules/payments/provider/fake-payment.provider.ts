@@ -94,20 +94,29 @@ export class FakePaymentProvider implements PaymentProvider {
       return Promise.reject(failure);
     }
 
-    const existingId = this.retention.get(input.idempotencyKey);
-
-    if (existingId !== undefined) {
-      // Within the retention window the provider returns the SAME object —
-      // this is what makes concurrent initiation produce exactly one intent.
-      return Promise.resolve(this.intents.get(existingId)!);
-    }
-
     // R2 (spec §6.4): the provider may report an amount that disagrees with
     // the one requested. This is the control the webhook's amount check and
     // its 502/mismatch paths are tested against.
-    const amountMinorUnits = this.nextCreateAmount ?? input.amountMinorUnits;
+    //
+    // Consumed HERE, before the retention lookup, so its lifetime is exactly
+    // "the next createPayment call" — the same lifetime as nextCreateFailure
+    // above. Reading it after the replay branch would leave it armed when the
+    // next call happened to be a replay, and fire it on a later, unrelated
+    // create.
+    const mismatchedAmount = this.nextCreateAmount;
 
     this.nextCreateAmount = null;
+
+    const existingId = this.retention.get(input.idempotencyKey);
+
+    if (existingId !== undefined) {
+      // Within the retention window the provider returns the SAME payment —
+      // this is what makes concurrent initiation produce exactly one intent.
+      // A copy, so a caller mutating the result cannot corrupt the fake.
+      return Promise.resolve({ ...this.intents.get(existingId)! });
+    }
+
+    const amountMinorUnits = mismatchedAmount ?? input.amountMinorUnits;
 
     this.sequence += 1;
 
@@ -116,7 +125,10 @@ export class FakePaymentProvider implements PaymentProvider {
       providerPaymentId,
       clientSecret: `${providerPaymentId}_secret_${this.sequence}`,
       amountMinorUnits,
-      currency: input.currency,
+      // ProviderPayment.currency is documented "Uppercase ISO-4217. Adapters
+      // normalise" — so the fake normalises, rather than relying on every
+      // caller already passing uppercase (C8, inbound side of the same rule).
+      currency: input.currency.toUpperCase(),
     };
 
     this.intents.set(providerPaymentId, payment);
@@ -126,7 +138,7 @@ export class FakePaymentProvider implements PaymentProvider {
       (this.createCounts.get(input.idempotencyKey) ?? 0) + 1,
     );
 
-    return Promise.resolve(payment);
+    return Promise.resolve({ ...payment });
   }
 
   retrievePayment(providerPaymentId: string): Promise<ProviderPayment> {
@@ -136,7 +148,10 @@ export class FakePaymentProvider implements PaymentProvider {
       return Promise.reject(new Error(`Unknown payment ${providerPaymentId}`));
     }
 
-    return Promise.resolve(payment);
+    // A copy: ProviderPayment has no readonly members, so handing back the
+    // stored object would let a caller mutate the fake's state and corrupt
+    // every later retrieval of the same intent.
+    return Promise.resolve({ ...payment });
   }
 
   verifyWebhook(rawBody: Buffer, signature: string): ProviderEvent {
@@ -145,7 +160,10 @@ export class FakePaymentProvider implements PaymentProvider {
     const expected = Buffer.from(this.sign(timestamp, rawBody), 'utf8');
     const actual = Buffer.from(digest, 'utf8');
 
-    // Length is compared first: timingSafeEqual throws on a length mismatch.
+    // Length is compared first: timingSafeEqual throws RangeError on a length
+    // mismatch, and a short-digest header is attacker-trivial (`v1=abcd`), so
+    // without this the refusal spec §8.5 requires to be a 400 would surface as
+    // an unmapped 500. Pinned by the wrong-length test in the spec file.
     // The digest covers the timestamp too, so a moved timestamp lands here
     // rather than in the tolerance check below.
     if (
@@ -164,7 +182,16 @@ export class FakePaymentProvider implements PaymentProvider {
       throw new Error('Webhook timestamp outside tolerance');
     }
 
-    const parsed: unknown = JSON.parse(rawBody.toString('utf8'));
+    let parsed: unknown;
+
+    try {
+      parsed = JSON.parse(rawBody.toString('utf8'));
+    } catch {
+      // Never let Node's SyntaxError escape: its message embeds a prefix of
+      // the attacker-supplied body, and every other refusal in this method is
+      // a controlled Error the webhook route maps to 400 (spec §8.5).
+      throw new Error('Malformed event payload');
+    }
 
     if (typeof parsed !== 'object' || parsed === null) {
       throw new Error('Malformed event payload');
@@ -236,7 +263,13 @@ export class FakePaymentProvider implements PaymentProvider {
       typeof error === 'string' ? new Error(error) : error;
   }
 
-  /** The next created intent reports this amount instead of the one asked for. */
+  /**
+   * The next createPayment reports this amount instead of the one asked for.
+   *
+   * One-shot with the same lifetime as failNextCreate: consumed by the next
+   * call whether or not that call creates an intent, so a retention replay
+   * cannot leave it armed.
+   */
   mismatchNextCreateAmount(amountMinorUnits: number): void {
     this.nextCreateAmount = amountMinorUnits;
   }
