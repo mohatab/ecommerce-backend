@@ -162,6 +162,26 @@ export class OrdersService {
       return 'not-found';
     }
 
-    return existing.status === OrderStatus.PAID ? 'already-paid' : 'cancelled';
+    // An exhaustive switch, not a ternary with a fallthrough: every status
+    // this method recognises is named, so adding a fourth OrderStatus member
+    // makes the switch non-exhaustive and the function fail to compile
+    // ("lacks ending return statement"). That forces a deliberate decision
+    // for the new status instead of silently labelling it 'cancelled'.
+    switch (existing.status) {
+      case OrderStatus.PAID:
+        return 'already-paid';
+      case OrderStatus.CANCELLED:
+        return 'cancelled';
+      case OrderStatus.PENDING:
+        // Unreachable in practice: PostgreSQL re-evaluates the CAS predicate
+        // against the committed row, so a row this call failed to claim
+        // cannot still be PENDING. Deliberately reported as 'cancelled'
+        // anyway, because that is the only one of the four outcomes that is
+        // safe when the state is anomalous — it neither claims the payment
+        // succeeded ('paid'/'already-paid') nor that the order is absent
+        // ('not-found'), and it routes the caller to its log-loudly,
+        // change-nothing branch (spec §17.1).
+        return 'cancelled';
+    }
   }
 }

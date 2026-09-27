@@ -1,6 +1,6 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { OrderStatus, Prisma } from '@prisma/client';
-import { OrdersService } from './orders.service';
+import { MarkPaidOutcome, OrdersService } from './orders.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { ProductsService } from '../products/products.service';
@@ -355,18 +355,25 @@ describe('OrdersService.markPaid', () => {
 
   // It is called from a webhook. Throwing would surface as a 404 to the
   // provider, which reads that as "never retry".
-  it('never throws on any of the CAS-miss paths', async () => {
-    for (const row of [
-      { status: OrderStatus.PAID },
-      { status: OrderStatus.CANCELLED },
-      null,
-    ]) {
+  it('never throws on any of the CAS-miss paths, and pins each outcome', async () => {
+    const cases: Array<{
+      row: { status: OrderStatus } | null;
+      outcome: MarkPaidOutcome;
+    }> = [
+      { row: { status: OrderStatus.PAID }, outcome: 'already-paid' },
+      { row: { status: OrderStatus.CANCELLED }, outcome: 'cancelled' },
+      { row: null, outcome: 'not-found' },
+    ];
+
+    for (const { row, outcome } of cases) {
       tx.order.updateMany.mockResolvedValue({ count: 0 });
       tx.order.findUnique.mockResolvedValue(row);
 
+      // The assertion is the exact outcome, not expect.any(String): the
+      // absence of a throw is necessary but says nothing about the answer.
       await expect(
         service.markPaid(tx as unknown as Prisma.TransactionClient, 'o'),
-      ).resolves.toEqual(expect.any(String));
+      ).resolves.toBe(outcome);
     }
   });
 

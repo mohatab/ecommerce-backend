@@ -11,6 +11,7 @@ import { createCategory } from './factories/category.factory';
 import { createProduct } from './factories/product.factory';
 import { createOrder } from './factories/order.factory';
 import { assertStockConserved } from './helpers/assert-stock-conserved';
+import { OrdersService } from '../src/modules/orders/orders.service';
 
 interface OrderListItem {
   id: string;
@@ -389,6 +390,75 @@ describe('Orders (e2e)', () => {
         where: { id: product.id },
       });
       expect(after.stockQuantity).toBe(10);
+    });
+  });
+
+  // markPaid has no HTTP route until Task 7, but it is reachable here exactly
+  // as the concurrency suites reach TokenService: resolve the provider and
+  // drive it through a real prisma.$transaction against the real database.
+  // These tests observe the STATE TRANSITION, not the shape of a Prisma
+  // argument, so removing `status: PENDING` from the CAS fails them by
+  // transitioning an order that must not be transitioned.
+  describe('OrdersService.markPaid against the real database', () => {
+    const pendingOrder = async (): Promise<string> => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id);
+      const order = await createOrder(prisma, userId, [
+        {
+          productId: product.id,
+          productName: product.name,
+          unitPriceCents: product.priceCents,
+          quantity: 1,
+        },
+      ]);
+
+      return order.id;
+    };
+
+    const markPaid = async (orderId: string): Promise<string> => {
+      const orders = app.get(OrdersService);
+
+      return prisma.$transaction((tx) => orders.markPaid(tx, orderId));
+    };
+
+    it('transitions PENDING to PAID once, then reports already-paid', async () => {
+      const orderId = await pendingOrder();
+
+      expect(await markPaid(orderId)).toBe('paid');
+      expect(
+        (await prisma.order.findUniqueOrThrow({ where: { id: orderId } }))
+          .status,
+      ).toBe(OrderStatus.PAID);
+
+      // A duplicate delivery must not write a second time.
+      expect(await markPaid(orderId)).toBe('already-paid');
+      expect(
+        (await prisma.order.findUniqueOrThrow({ where: { id: orderId } }))
+          .status,
+      ).toBe(OrderStatus.PAID);
+    });
+
+    it('leaves a CANCELLED order cancelled and reports cancelled', async () => {
+      const orderId = await pendingOrder();
+      const cancelledAt = new Date();
+      await prisma.order.update({
+        where: { id: orderId },
+        data: { status: OrderStatus.CANCELLED, cancelledAt },
+      });
+
+      expect(await markPaid(orderId)).toBe('cancelled');
+
+      const reread = await prisma.order.findUniqueOrThrow({
+        where: { id: orderId },
+      });
+      expect(reread.status).toBe(OrderStatus.CANCELLED);
+      expect(reread.cancelledAt).toEqual(cancelledAt);
+    });
+
+    it('reports not-found for an unknown order without throwing', async () => {
+      await expect(
+        markPaid('00000000-0000-7000-8000-000000000000'),
+      ).resolves.toBe('not-found');
     });
   });
 });
