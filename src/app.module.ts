@@ -11,6 +11,7 @@ import { CategoriesModule } from './modules/categories/categories.module';
 import { ProductsModule } from './modules/products/products.module';
 import { CartModule } from './modules/cart/cart.module';
 import { OrdersModule } from './modules/orders/orders.module';
+import { PaymentsModule } from './modules/payments/payments.module';
 import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
 import { RolesGuard } from './modules/auth/guards/roles.guard';
 
@@ -46,6 +47,7 @@ import { RolesGuard } from './modules/auth/guards/roles.guard';
     ProductsModule,
     CartModule,
     OrdersModule,
+    PaymentsModule,
   ],
   providers: [
     // ThrottlerGuard is registered under its own token first, then aliased
