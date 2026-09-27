@@ -10,6 +10,7 @@ import { createUser } from './factories/user.factory';
 import { createCategory } from './factories/category.factory';
 import { createProduct } from './factories/product.factory';
 import { createOrder } from './factories/order.factory';
+import { assertStockConserved } from './helpers/assert-stock-conserved';
 
 interface OrderListItem {
   id: string;
@@ -301,5 +302,93 @@ describe('Orders (e2e)', () => {
     expect(body.items[0].unitPriceCents).toBe(1000);
     expect(body.items[0].lineTotalCents).toBe(2000);
     expect(body.totalCents).toBe(2000);
+  });
+
+  describe('cancelling a non-pending order', () => {
+    it('returns 409 on a PAID order and restores no stock', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 10,
+      });
+      const order = await createOrder(prisma, userId, [
+        {
+          productId: product.id,
+          productName: product.name,
+          unitPriceCents: product.priceCents,
+          quantity: 2,
+        },
+      ]);
+
+      // The factory does not decrement stock, so mirror checkout by hand:
+      // conservation is asserted against 8 held-by-order units below.
+      await prisma.product.update({
+        where: { id: product.id },
+        data: { stockQuantity: 8 },
+      });
+      await prisma.order.update({
+        where: { id: order.id },
+        data: { status: OrderStatus.PAID },
+      });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/orders/${order.id}/cancel`)
+        .set('Authorization', auth())
+        .expect(409);
+
+      const after = await prisma.product.findUniqueOrThrow({
+        where: { id: product.id },
+      });
+
+      expect(after.stockQuantity).toBe(8);
+
+      // A PAID order still holds its stock: 8 remaining + 2 held = 10.
+      await assertStockConserved(prisma, product.id, 10);
+
+      const reread = await prisma.order.findUniqueOrThrow({
+        where: { id: order.id },
+      });
+
+      expect(reread.status).toBe(OrderStatus.PAID);
+      expect(reread.cancelledAt).toBeNull();
+    });
+
+    it('still returns 200 idempotently on an already-CANCELLED order', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 10,
+      });
+      const cancelledAt = new Date();
+      const order = await createOrder(
+        prisma,
+        userId,
+        [
+          {
+            productId: product.id,
+            productName: product.name,
+            unitPriceCents: product.priceCents,
+            quantity: 2,
+          },
+        ],
+        { status: OrderStatus.CANCELLED, cancelledAt },
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/orders/${order.id}/cancel`)
+        .set('Authorization', auth())
+        .expect(200);
+
+      const body = response.body as OrderListItem;
+      expect(body).toMatchObject({
+        id: order.id,
+        status: OrderStatus.CANCELLED,
+      });
+      expect(body.cancelledAt).toBe(cancelledAt.toISOString());
+
+      // Stock was never taken by the factory and must not be handed back.
+      const after = await prisma.product.findUniqueOrThrow({
+        where: { id: product.id },
+      });
+      expect(after.stockQuantity).toBe(10);
+    });
   });
 });

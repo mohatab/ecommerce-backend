@@ -1,9 +1,17 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { OrderStatus } from '@prisma/client';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { OrderWithItems } from './dto/order-response.dto';
 import { ProductsService } from '../products/products.service';
+
+/** The four ways markPaid can end. It never throws, so this is the whole API. */
+export type MarkPaidOutcome =
+  'paid' | 'already-paid' | 'cancelled' | 'not-found';
 
 @Injectable()
 export class OrdersService {
@@ -78,6 +86,14 @@ export class OrdersService {
           throw new NotFoundException('Order not found');
         }
 
+        // Phase 4: a paid order cannot be cancelled. Restoring its stock
+        // would give back goods that were paid for and would owe a refund,
+        // which is out of scope (spec §4.3). A different answer from the
+        // already-cancelled case below, so the two branches are split.
+        if (existing.status === OrderStatus.PAID) {
+          throw new ConflictException('Order is already paid');
+        }
+
         // Already cancelled: idempotent, and stock is NOT restored again.
         return existing;
       }
@@ -100,5 +116,52 @@ export class OrdersService {
         include: { items: true },
       });
     });
+  }
+
+  /**
+   * The ONLY writer of OrderStatus.PAID anywhere in src/ (D9, C6).
+   *
+   * `tx` is REQUIRED, with no default, exactly as
+   * ProductsService.decrementStock(tx, …) is: the write must run inside the
+   * caller's transaction — the webhook's — so the event insert, the payment
+   * promotion and this transition commit or roll back together. Nothing here
+   * touches this.prisma.
+   *
+   * The updateMany is a compare-and-swap: only the caller whose write matched
+   * a PENDING row transitions the order, so duplicate or concurrent webhook
+   * deliveries transition it EXACTLY ONCE. Do not replace it with a read, a
+   * status check and an update.
+   *
+   * It NEVER throws. Its caller is a webhook handler, and a thrown
+   * NotFoundException would reach the payment provider as a 404 — which most
+   * providers read as "this event is permanently rejected, stop retrying".
+   * The outcome is returned instead and the caller chooses the response,
+   * which for the webhook is always 200.
+   */
+  async markPaid(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+  ): Promise<MarkPaidOutcome> {
+    const { count } = await tx.order.updateMany({
+      where: { id: orderId, status: OrderStatus.PENDING },
+      data: { status: OrderStatus.PAID },
+    });
+
+    if (count === 1) {
+      return 'paid';
+    }
+
+    // Same shape as cancel()'s CAS-miss branch: classify by reading the row,
+    // through the same tx so it sees the caller's uncommitted writes.
+    const existing = await tx.order.findUnique({
+      where: { id: orderId },
+      select: { status: true },
+    });
+
+    if (existing === null) {
+      return 'not-found';
+    }
+
+    return existing.status === OrderStatus.PAID ? 'already-paid' : 'cancelled';
   }
 }
