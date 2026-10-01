@@ -4,6 +4,8 @@ import { AppConfig } from '../../config/configuration';
 import { PAYMENT_PROVIDER, PaymentProvider } from './provider/payment-provider';
 import { FakePaymentProvider } from './provider/fake-payment.provider';
 import { StripePaymentProvider } from './provider/stripe-payment.provider';
+import { PaymentsController } from './payments.controller';
+import { PaymentsService } from './payments.service';
 
 /**
  * Selection is by configuration, so the e2e suite boots the real AppModule
@@ -27,8 +29,13 @@ export function createPaymentProvider(
     : new FakePaymentProvider(configService);
 }
 
+// PrismaModule is @Global, so PrismaService needs no import here. Nothing
+// else is imported: initiation touches only orders and payments, never carts
+// or stock, and it never writes the orders table.
 @Module({
+  controllers: [PaymentsController],
   providers: [
+    PaymentsService,
     {
       provide: PAYMENT_PROVIDER,
       inject: [ConfigService],
