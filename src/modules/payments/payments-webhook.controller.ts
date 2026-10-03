@@ -14,6 +14,7 @@ import { Throttle } from '@nestjs/throttler';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { Public } from '../../common/decorators/public.decorator';
+import { PaymentWebhookService } from './payment-webhook.service';
 import {
   PAYMENT_PROVIDER,
   SUPPORTED_EVENT_TYPE,
@@ -53,6 +54,7 @@ export class PaymentsWebhookController {
 
   constructor(
     @Inject(PAYMENT_PROVIDER) private readonly provider: PaymentProvider,
+    private readonly webhookService: PaymentWebhookService,
   ) {}
 
   /**
@@ -88,10 +90,10 @@ export class PaymentsWebhookController {
     status: 400,
     description: 'Invalid signature, or an unusable payload',
   })
-  handle(
+  async handle(
     @Req() request: RawBodyRequest<Request>,
     @Headers('stripe-signature') signature: string | undefined,
-  ): WebhookAck {
+  ): Promise<WebhookAck> {
     const event = this.verify(request, signature);
 
     // LOAD-BEARING, not belt-and-braces. The adapters' field checks are
@@ -109,7 +111,11 @@ export class PaymentsWebhookController {
       return { received: true };
     }
 
-    // Task 7 applies state here.
+    // Everything the delivery changes happens in there, in ONE transaction.
+    // It throws only on a genuine database failure, which must surface as a
+    // 500 so the provider retries — never as a swallowed 200.
+    await this.webhookService.apply(event);
+
     return { received: true };
   }
 

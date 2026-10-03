@@ -1,7 +1,8 @@
-import { BadRequestException, Logger } from '@nestjs/common';
+import { BadRequestException } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
 import type { Request } from 'express';
 import { IS_PUBLIC_KEY } from '../../common/decorators/public.decorator';
+import { PaymentWebhookService } from './payment-webhook.service';
 import { PaymentsWebhookController } from './payments-webhook.controller';
 import { SUPPORTED_EVENT_TYPE } from './provider/payment-provider';
 import type {
@@ -27,6 +28,17 @@ describe('PaymentsWebhookController', () => {
   let provider: {
     verifyWebhook: jest.Mock<ProviderEvent, [Buffer, string]>;
   };
+  let webhookService: { apply: jest.Mock<Promise<void>, [ProviderEvent]> };
+
+  /** `handle` is async, so a refusal is a REJECTION, never a sync throw. */
+  const reject = (
+    request: RawBodyRequest<Request>,
+    signature: string | undefined,
+  ): Promise<unknown> =>
+    controller.handle(request, signature).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
 
   beforeEach(() => {
     provider = {
@@ -34,103 +46,83 @@ describe('PaymentsWebhookController', () => {
         .fn<ProviderEvent, [Buffer, string]>()
         .mockReturnValue(EVENT),
     };
+    webhookService = {
+      apply: jest
+        .fn<Promise<void>, [ProviderEvent]>()
+        .mockResolvedValue(undefined),
+    };
 
     controller = new PaymentsWebhookController(
       provider as unknown as PaymentProvider,
+      webhookService as unknown as PaymentWebhookService,
     );
   });
 
-  it('verifies against the RAW bytes, not the parsed body', () => {
+  it('verifies against the RAW bytes, not the parsed body', async () => {
     const raw = Buffer.from('{"a":1}');
 
-    controller.handle(requestWith(raw), 'sig');
+    await controller.handle(requestWith(raw), 'sig');
 
     expect(provider.verifyWebhook).toHaveBeenCalledWith(raw, 'sig');
   });
 
-  it('returns { received: true } for a supported event', () => {
-    expect(controller.handle(requestWith(Buffer.from('{}')), 'sig')).toEqual({
-      received: true,
-    });
+  it('returns { received: true } for a supported event', async () => {
+    await expect(
+      controller.handle(requestWith(Buffer.from('{}')), 'sig'),
+    ).resolves.toEqual({ received: true });
   });
 
-  it('acknowledges an unsupported event type without erroring', () => {
-    provider.verifyWebhook.mockReturnValue({
-      ...EVENT,
-      type: 'payment_intent.payment_failed',
-    });
+  it('applies a supported event', async () => {
+    await controller.handle(requestWith(Buffer.from('{}')), 'sig');
 
-    expect(controller.handle(requestWith(Buffer.from('{}')), 'sig')).toEqual({
-      received: true,
-    });
+    expect(webhookService.apply).toHaveBeenCalledWith(EVENT);
   });
 
   /**
-   * The event-type check is load-bearing — the adapters' field checks are
-   * structural, not type discriminants, so a `charge.refunded` delivery
-   * normalises into a well-formed ProviderEvent and this comparison is the
-   * only thing stopping it from reaching state application in Task 7.
-   *
-   * In Task 6 both branches return the same ack and write nothing, so the
-   * debug log is the ONLY observable difference. Asserting it is what makes
-   * deleting the check a test failure today rather than in Task 7.
+   * The event-type check is load-bearing, and from this task on it suppresses
+   * a real write rather than only a log line: the adapters' field checks are
+   * STRUCTURAL, not type discriminants, so a `charge.refunded` delivery
+   * normalises into a well-formed ProviderEvent. Deleting the check makes
+   * this assertion fail here, and the e2e control in
+   * test/payments-webhook.e2e-spec.ts fail at the HTTP boundary.
    */
-  it('takes the ignore branch for an unsupported type and not for the supported one', () => {
-    const debug = jest
-      .spyOn(Logger.prototype, 'debug')
-      .mockImplementation(() => undefined);
+  it('does NOT apply an unsupported event type', async () => {
+    provider.verifyWebhook.mockReturnValue({
+      ...EVENT,
+      type: 'charge.refunded',
+    });
 
-    try {
-      controller.handle(requestWith(Buffer.from('{}')), 'sig');
-
-      expect(debug).not.toHaveBeenCalled();
-
-      provider.verifyWebhook.mockReturnValue({
-        ...EVENT,
-        type: 'charge.refunded',
-      });
-
-      controller.handle(requestWith(Buffer.from('{}')), 'sig');
-
-      expect(debug).toHaveBeenCalledWith(
-        expect.stringContaining('charge.refunded'),
-      );
-    } finally {
-      debug.mockRestore();
-    }
+    await expect(
+      controller.handle(requestWith(Buffer.from('{}')), 'sig'),
+    ).resolves.toEqual({ received: true });
+    expect(webhookService.apply).not.toHaveBeenCalled();
   });
 
-  it('400s when the signature header is missing', () => {
-    expect(() =>
-      controller.handle(requestWith(Buffer.from('{}')), undefined),
-    ).toThrow(BadRequestException);
+  it('400s when the signature header is missing', async () => {
+    await expect(
+      reject(requestWith(Buffer.from('{}')), undefined),
+    ).resolves.toBeInstanceOf(BadRequestException);
     expect(provider.verifyWebhook).not.toHaveBeenCalled();
+    expect(webhookService.apply).not.toHaveBeenCalled();
   });
 
-  it('400s when verification throws', () => {
+  it('400s when verification throws', async () => {
     provider.verifyWebhook.mockImplementation(() => {
       throw new Error('No signatures found matching the expected signature');
     });
 
-    expect(() =>
-      controller.handle(requestWith(Buffer.from('{}')), 'bad'),
-    ).toThrow(BadRequestException);
+    await expect(
+      reject(requestWith(Buffer.from('{}')), 'bad'),
+    ).resolves.toBeInstanceOf(BadRequestException);
+    expect(webhookService.apply).not.toHaveBeenCalled();
   });
 
-  it('never leaks the provider’s verification message', () => {
+  it('never leaks the provider’s verification message', async () => {
     provider.verifyWebhook.mockImplementation(() => {
       throw new Error('timestamp outside the tolerance zone');
     });
 
-    const error = (() => {
-      try {
-        controller.handle(requestWith(Buffer.from('{}')), 'bad');
-      } catch (caught: unknown) {
-        return caught;
-      }
-
-      return null;
-    })();
+    const error = await reject(requestWith(Buffer.from('{}')), 'bad');
 
     expect(JSON.stringify(error)).not.toContain('tolerance');
   });
@@ -138,23 +130,26 @@ describe('PaymentsWebhookController', () => {
   // A misconfiguration that silently disabled signature checking on a money
   // endpoint is the worst outcome available in this phase, so it must be
   // LOUD: a 500, never a fallback to an empty buffer.
-  it('throws a non-4xx error when rawBody is missing entirely', () => {
-    expect(() => controller.handle(requestWith(undefined), 'sig')).toThrow(
-      /raw body/i,
-    );
+  it('throws a non-4xx error when rawBody is missing entirely', async () => {
+    const error = await reject(requestWith(undefined), 'sig');
 
-    const error = (() => {
-      try {
-        controller.handle(requestWith(undefined), 'sig');
-      } catch (caught: unknown) {
-        return caught;
-      }
-
-      return null;
-    })();
-
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/raw body/i);
     expect(error).not.toBeInstanceOf(BadRequestException);
     expect(provider.verifyWebhook).not.toHaveBeenCalled();
+    expect(webhookService.apply).not.toHaveBeenCalled();
+  });
+
+  // A database failure inside the transaction must reach the client as a 500,
+  // never be swallowed into an ack: a 2xx would tell the provider the delivery
+  // was handled and stop the retry that is the only recovery path.
+  it('lets a database failure escape instead of acknowledging it', async () => {
+    webhookService.apply.mockRejectedValue(new Error('connection terminated'));
+
+    const error = await reject(requestWith(Buffer.from('{}')), 'sig');
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(BadRequestException);
   });
 
   // The decorators carry two security properties that no in-process call to

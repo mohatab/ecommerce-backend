@@ -1,12 +1,14 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppConfig } from '../../config/configuration';
+import { OrdersModule } from '../orders/orders.module';
 import { PAYMENT_PROVIDER, PaymentProvider } from './provider/payment-provider';
 import { FakePaymentProvider } from './provider/fake-payment.provider';
 import { StripePaymentProvider } from './provider/stripe-payment.provider';
 import { PaymentsController } from './payments.controller';
 import { PaymentsWebhookController } from './payments-webhook.controller';
 import { PaymentsService } from './payments.service';
+import { PaymentWebhookService } from './payment-webhook.service';
 
 /**
  * Selection is by configuration, so the e2e suite boots the real AppModule
@@ -30,16 +32,20 @@ export function createPaymentProvider(
     : new FakePaymentProvider(configService);
 }
 
-// PrismaModule is @Global, so PrismaService needs no import here. Nothing
-// else is imported: initiation touches only orders and payments, never carts
-// or stock, and it never writes the orders table.
+// PrismaModule is @Global, so PrismaService needs no import here. OrdersModule
+// is imported for ONE provider: OrdersService.markPaid, the only writer of
+// OrderStatus.PAID (D9, C6). PaymentsModule never writes the orders table
+// itself, and initiation still touches only orders and payments, never carts
+// or stock.
 @Module({
+  imports: [OrdersModule],
   // Two controllers, one trust posture each (C7): every route on
   // PaymentsController is bearer-authenticated, every route on
   // PaymentsWebhookController is @Public() and authenticated by signature.
   controllers: [PaymentsController, PaymentsWebhookController],
   providers: [
     PaymentsService,
+    PaymentWebhookService,
     {
       provide: PAYMENT_PROVIDER,
       inject: [ConfigService],
