@@ -5,6 +5,7 @@ import { PAYMENT_PROVIDER, PaymentProvider } from './provider/payment-provider';
 import { FakePaymentProvider } from './provider/fake-payment.provider';
 import { StripePaymentProvider } from './provider/stripe-payment.provider';
 import { PaymentsController } from './payments.controller';
+import { PaymentsWebhookController } from './payments-webhook.controller';
 import { PaymentsService } from './payments.service';
 
 /**
@@ -33,7 +34,10 @@ export function createPaymentProvider(
 // else is imported: initiation touches only orders and payments, never carts
 // or stock, and it never writes the orders table.
 @Module({
-  controllers: [PaymentsController],
+  // Two controllers, one trust posture each (C7): every route on
+  // PaymentsController is bearer-authenticated, every route on
+  // PaymentsWebhookController is @Public() and authenticated by signature.
+  controllers: [PaymentsController, PaymentsWebhookController],
   providers: [
     PaymentsService,
     {
