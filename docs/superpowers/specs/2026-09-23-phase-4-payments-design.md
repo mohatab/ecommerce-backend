@@ -629,7 +629,7 @@ only an optimisation for the concurrent window.
 | # | Case | Behaviour | Guarantee |
 |---|---|---|---|
 | 1 | **First initiation** | Steps 1–4; row created; **201** | One intent |
-| 2 | **Concurrent initiation** (N requests) | All reach step 4 within the retention window by definition (they are simultaneous). The provider's key dedupe returns the **same** intent to all N. One `createMany` sets `count = 1` → **201**; the rest get `count = 0` → **200**, and all N return the **same** `clientSecret` from their own `created`, with **no extra network call** | Exactly one `Payment` row; exactly one intent created at the provider (asserted by the fake's per-key counter, test P3). The counter alone cannot show how many initiations raced; `mintedIntentsFor()` over the existing `retrievePayment` port is what makes the overlap legible  see the P3 row in §19 |
+| 2 | **Concurrent initiation** (N requests) | All reach step 4 within the retention window by definition (they are simultaneous). The provider's key dedupe returns the **same** intent to all N. One `createMany` sets `count = 1` → **201**; the rest get `count = 0` → **200**, and all N return the **same** `clientSecret` from their own `created`, with **no extra network call** | Exactly one `Payment` row; exactly one intent created at the provider (asserted by the fake's per-key counter, test P3). The counter alone cannot show how many initiations raced; `mintedIntentsFor()` over the existing `retrievePayment` port is what makes the overlap legible — see the P3 row in §19 |
 | 3 | **Client timeout after provider acceptance, local row written** | Retry takes step 3 → row found → step 5 retrieve → **200**, same intent | One intent |
 | 4 | **Client timeout after provider acceptance, local row NOT written** (crash between step 4's call and its insert) | Retry **within retention**: same key → same intent → row written → **201**. Retry **after retention**: a **new** intent is created and persisted. The first intent is orphaned | See case 8 |
 | 5 | **Retry within provider retention** | Covered by 3 and 4 | One intent |
@@ -1411,7 +1411,7 @@ Delivered by the implementation plan's tasks, not by this spec:
 ## 19. Evidence
 
 Filled in before Phase 4 can be called done. An empty cell at review time means the
-corresponding claim in this spec is **unproven**, and the phase is not done 
+corresponding claim in this spec is **unproven**, and the phase is not done —
 with the single exception of a row this table itself marks *optional*, which
 carries no claim the other rows do not already prove (see **Emitted dedupe SQL**).
 
