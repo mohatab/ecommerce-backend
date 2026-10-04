@@ -20,8 +20,6 @@ import { createOrder, OrderWithItems } from './factories/order.factory';
 /** response.body is `any`; cast once, as every other e2e suite does. */
 interface PaymentBody {
   id: string;
-  orderId: string;
-  status: string;
   clientSecret: string;
 }
 
@@ -151,23 +149,29 @@ describe('Payments concurrency (e2e)', () => {
   const firstIntentId = (orderId: string): string => `pi_fake_${orderId}_1`;
 
   /**
-   * How many intents the provider actually HOLDS for an order, counted by
-   * probing its retrievePayment port for each id the fake's deterministic
-   * scheme could have minted.
+   * How many intents the provider actually HOLDS for one order, counted by
+   * probing its retrievePayment port for every id the fake's deterministic
+   * scheme could have minted for it (`pi_fake_<orderId>_<sequence>`, with the
+   * sequence zeroed by reset() in beforeEach).
    *
-   * This is deliberately independent of `createCountFor`, which is keyed by
-   * the idempotency KEY: a naive per-call key leaves that counter at 0 for the
+   * `globalSequenceBound` is NOT a per-order count: the fake's `sequence` is
+   * GLOBAL across every order, so the bound must cover every intent the test
+   * could mint in total, not just this order's. Both callers are single-order
+   * tests, which is the only reason a small bound is safe there.
+   *
+   * Deliberately independent of `createCountFor`, which is keyed by the
+   * idempotency KEY: a naive per-call key leaves that counter at 0 for the
    * order while still stranding one intent per call. Only this probe
    * distinguishes "one intent was minted" from "several were minted and all
    * but one discarded", so it is what makes P3's and I1's evidence legible.
    */
-  const mintedIntents = async (
+  const mintedIntentsFor = async (
     orderId: string,
-    upTo: number,
+    globalSequenceBound: number,
   ): Promise<number> => {
     let minted = 0;
 
-    for (let sequence = 1; sequence <= upTo; sequence += 1) {
+    for (let sequence = 1; sequence <= globalSequenceBound; sequence += 1) {
       try {
         await provider.retrievePayment(`pi_fake_${orderId}_${sequence}`);
         minted += 1;
@@ -258,13 +262,12 @@ describe('Payments concurrency (e2e)', () => {
     const after = await prisma.product.findUniqueOrThrow({
       where: { id: product.id },
     });
-    const payment = await prisma.payment.findUniqueOrThrow({
-      where: { orderId: order.id },
-    });
 
-    // The corruption this guards, asserted before the branches so it is
-    // checked whoever won: PAID with the stock handed back means the goods
-    // were both sold and returned.
+    // The corruption this guards, asserted before the branches AND before any
+    // findUniqueOrThrow, so it is checked whoever won and so a control that
+    // also removes a row cannot fail this test on a Prisma P2025 instead of on
+    // the assertion that matters (the same ordering rule P4b states): PAID with
+    // the stock handed back means the goods were both sold and returned.
     expect(
       reread.status === OrderStatus.PAID &&
         after.stockQuantity === initialStock,
@@ -280,6 +283,12 @@ describe('Payments concurrency (e2e)', () => {
       expect(after.stockQuantity).toBe(initialStock);
       expect(cancelled.status).toBe(200);
     }
+
+    // Read only now, once the illegal state has been ruled out. The money is
+    // recorded as taken in both legal outcomes.
+    const payment = await prisma.payment.findUniqueOrThrow({
+      where: { orderId: order.id },
+    });
 
     expect(payment.status).toBe(PaymentStatus.SUCCEEDED);
     await assertStockConserved(prisma, product.id, initialStock);
@@ -299,7 +308,7 @@ describe('Payments concurrency (e2e)', () => {
     // deterministic key, and HOLDS exactly one intent for the order however it
     // was keyed. The second assertion is the one a per-call key cannot satisfy
     // by accident.
-    expect(await mintedIntents(order.id, 15)).toBe(1);
+    expect(await mintedIntentsFor(order.id, 15)).toBe(1);
     expect(provider.createCountFor(order.id)).toBe(1);
     expect(await prisma.payment.count({ where: { orderId: order.id } })).toBe(
       1,
@@ -328,12 +337,30 @@ describe('Payments concurrency (e2e)', () => {
       initiate(order.id, token),
     ]);
 
-    expectNoServerErrors([webhook, initiation]);
+    // The webhook is the invariant-bearing side and is held to the suite's
+    // no-5xx rule strictly. Initiation is not, for the ONE documented reason
+    // below — which is why its status is checked against a closed set instead.
+    expectNoServerErrors([webhook]);
     expect(webhook.status).toBe(200);
-    // Initiation either persisted the row first (201), found the webhook's row
-    // for the same intent (200), or found the order already paid (409). All
-    // three are correct; nothing else is.
-    expect([200, 201, 409]).toContain(initiation.status);
+
+    // Four legal outcomes for initiation, decided by where the webhook's
+    // commit lands in its sequence of autocommit reads:
+    //   201 — it persisted the payment row first;
+    //   200 — it found the webhook's row for the same intent;
+    //   409 — it read the order already PAID;
+    //   502 — the narrow one. The webhook commits BETWEEN initiation's
+    //         order.findFirst (which therefore still reads PENDING) and its
+    //         payment.findUnique (which therefore finds the webhook's row).
+    //         Initiation skips createPayment, so the fake never mints
+    //         pi_fake_<orderId>_1, and the replay branch calls
+    //         retrievePayment on an id the provider does not hold — a
+    //         correctly mapped BadGatewayException, not an unmapped failure.
+    //         It is a property of the FAKE (a real provider always knows the
+    //         intent it just created and webhooked about), and no invariant
+    //         below is weakened by it: the order is PAID, with exactly one
+    //         payment row and one event row, in all four cases.
+    //         P4b is the deterministic proof; this test adds the race.
+    expect([200, 201, 409, 502]).toContain(initiation.status);
 
     const reread = await prisma.order.findUniqueOrThrow({
       where: { id: order.id },
@@ -417,7 +444,7 @@ describe('Payments concurrency (e2e)', () => {
 
     // No second intent was ever created at the provider.
     expect(provider.createCountFor(order.id)).toBe(1);
-    expect(await mintedIntents(order.id, 8)).toBe(1);
+    expect(await mintedIntentsFor(order.id, 8)).toBe(1);
     expect(await prisma.payment.count({ where: { orderId: order.id } })).toBe(
       1,
     );
