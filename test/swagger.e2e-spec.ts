@@ -122,7 +122,7 @@ describe('OpenAPI document (e2e)', () => {
       const { summary } = operation();
 
       expect(typeof summary).toBe('string');
-      expect(summary).not.toBe('');
+      expect(summary?.trim()).not.toBe('');
     });
 
     it('documents exactly the expected @ApiResponse status codes', () => {
