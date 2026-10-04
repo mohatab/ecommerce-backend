@@ -140,6 +140,96 @@ configured age, reusing the existing cancellation path (design spec §5.6) so
 restoration stays exactly-once. Do not implement a bespoke expiry that writes
 stock directly.
 
+**Phase 4 amendment.** Phase 4 increases the rate at which such orders appear,
+because an abandoned payment attempt leaves a `PENDING` order behind. The
+mitigation is unchanged — the customer can cancel — and the fix is unchanged: a
+periodic job reusing the existing cancellation path.
+
+### A payment that succeeds after its order was cancelled is recorded but not refunded
+
+**Owner: unscheduled (refunds).**
+
+Refunds need a provider refund call, a refund state model, and a policy decision
+about who may trigger one — a phase of its own. Phase 4's decision D5
+deliberately keeps cancellation unblocked rather than closing the window by
+making orders un-cancellable, so the window is accepted rather than removed.
+
+What happens today: the order stays `CANCELLED`, the payment is recorded
+`SUCCEEDED`, an error-level log is emitted, and **200** is returned so the
+provider stops retrying. The state is queryable —
+`payments.status = 'SUCCEEDED'` joined to `orders.status = 'CANCELLED'`.
+
+A future phase must call the provider's refund API for exactly those rows,
+exactly once, with its own idempotency guarantee. **Nothing in this codebase
+refunds anything today.**
+
+### There is no automated reconciliation between provider state and local state
+
+**Owner: Phase 5 (scheduled jobs).**
+
+A sweep is scheduled work, and scheduled work arrives in Phase 5.
+
+What happens today: every divergence — an event for an unknown order, an amount
+or currency mismatch, a divergent `providerPaymentId`, a provider success that
+landed while the database was unavailable — is recorded in `payment_events` and
+logged at error level, and is detectable by query. But **nothing looks
+automatically**, so detection depends on someone reading logs.
+
+A future phase must add a periodic job comparing provider payment state against
+local `Payment` and `Order` state, and reporting the divergences.
+
+### `payment_events` rows are never deleted
+
+**Owner: Phase 5 (Redis + BullMQ), alongside the existing `refresh_tokens` purge.**
+
+Identical in shape to that entry. One row per accepted delivery, forever. This
+is disk growth, not latency — the only lookup is by a unique index.
+
+A future phase must extend the same purge job, and add an index on the timestamp
+used for the cutoff at that time, since no current query needs one.
+
+### Not every `PENDING` order is payable
+
+**Owner: none — accepted by design.** See the Phase 4 design spec §5.4 and C4.
+
+Phase 3's `MAX_TOTAL_CENTS` is the `INT` bound and predates any payment
+provider. Narrowing it at checkout would couple the order domain to a provider's
+price list and retroactively invalidate persisted orders, so it stays wider than
+the payable range.
+
+What happens today: an order whose total is outside the payable range
+(`USD → { 50, 99_999_999 }` minor units, the **lowest** documented provider
+tier, because the payment method is unknown at initiation), or whose currency is
+not supported for payment, returns **422** on `POST /api/v1/orders/:id/payments`
+— **before any provider call**, so no intent is ever created for it. The order
+remains valid and cancellable, and its stock returns on cancel.
+
+A future phase must do nothing, unless a product decision says such orders
+should be impossible to create — at which point the constraint belongs in
+checkout, with a migration story for existing rows.
+
+### Payment initiation's stale-read window is benign
+
+**Not a limitation — recorded so that nobody chases a bug that does not exist.**
+
+Initiation reads the order and then reads the payment row in two separate
+statements, so a webhook can commit between them. That is real, and it is
+harmless: the stale-read window between initiation's order read and payment read
+is benign (200 via retrieve); a 502 there means provider unavailability, not a
+defect.
+
+Why it cannot corrupt anything: `recordPayment` and `markPaid` commit
+**atomically** in one transaction, so a webhook-created payment row always
+arrives together with the order leaving `PENDING`. A later initiation therefore
+hits the 409 status guard before it can reach `retrievePayment`. The order is
+`PAID`, with exactly one `payments` row and one `payment_events` row, in every
+interleaving.
+
+`test/payments-concurrency.e2e-spec.ts` admits 502 in one concurrent case
+because `FakePaymentProvider` only holds ids it minted itself; a real provider
+always recognises the intent it just created and sent a webhook about, so
+`retrievePayment` succeeds there and the outcome is 200.
+
 ---
 
 ## Testing
@@ -158,6 +248,25 @@ that only stay unique because nothing runs in parallel.
 
 **Do not raise `maxWorkers` until per-worker database isolation exists.** Raising
 it produces intermittent, misleading failures that look like application bugs.
+
+### Real provider network behaviour is not covered by CI
+
+**Owner: unscheduled.**
+
+CI has no provider credentials by design (Phase 4 design spec §12.3), and real
+network behaviour cannot be made deterministic.
+
+What happens today: `FakePaymentProvider` covers every branch of the service
+layer and the full signature pipeline — it signs with HMAC-SHA256 over the raw
+body and verifies in constant time, so it is not a weaker verifier than the
+thing it stands in for. The Stripe adapter's signature verification is
+unit-tested offline using the SDK's own test header generator. Its **HTTP**
+behaviour — real retries, real error shapes, the real intent lifecycle — is
+exercised only by hand against Stripe test mode. Mitigated by keeping the
+adapter thin enough to read in one sitting.
+
+A future phase must add a manually triggered smoke test against provider test
+mode, kept out of the required CI path.
 
 ### The test database persists between runs
 
