@@ -1,11 +1,14 @@
-import { Category, Product } from '@prisma/client';
+import { Category, OrderStatus, PaymentStatus, Product } from '@prisma/client';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { truncateAll } from './helpers/truncate';
+import { assertStockConserved } from './helpers/assert-stock-conserved';
 import { createUser } from './factories/user.factory';
 import { createCategory } from './factories/category.factory';
 import { createProduct } from './factories/product.factory';
 import { createCart, createCartItem } from './factories/cart.factory';
 import { createOrder } from './factories/order.factory';
+import { createPayment } from './factories/payment.factory';
+import { createPaymentEvent } from './factories/payment-event.factory';
 
 describe('catalog factories', () => {
   let prisma: PrismaService;
@@ -135,6 +138,119 @@ describe('catalog factories', () => {
           data: { stockQuantity: { decrement: 5 } },
         }),
       ).rejects.toThrow();
+    });
+  });
+
+  describe('payment factories', () => {
+    it('creates a payment for an order and a standalone payment event', async () => {
+      const user = await createUser(prisma);
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id);
+      const order = await createOrder(prisma, user.id, [
+        {
+          productId: product.id,
+          productName: product.name,
+          unitPriceCents: product.priceCents,
+          quantity: 1,
+        },
+      ]);
+
+      const payment = await createPayment(prisma, order.id);
+
+      expect(payment.orderId).toBe(order.id);
+      expect(payment.status).toBe(PaymentStatus.PENDING);
+      expect(payment.succeededAt).toBeNull();
+      expect(payment.id).toMatch(/^[0-9a-f-]{36}$/);
+
+      const event = await createPaymentEvent(prisma);
+
+      expect(event.type).toBe('payment_intent.succeeded');
+      expect(event.id).toMatch(/^[0-9a-f-]{36}$/);
+    });
+
+    // Spec §11.2 calls both of these load-bearing, and neither is exercised by
+    // anything else yet: one payment per order is what keeps a replayed
+    // initiation idempotent, and Restrict is what stops an order deletion
+    // silently taking the payment record with it. The rejection is asserted,
+    // not a particular Prisma code — the mapping to a status belongs to
+    // HttpExceptionFilter, not here.
+    it('refuses a second payment for the same order (Payment.orderId is unique)', async () => {
+      const user = await createUser(prisma);
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id);
+      const order = await createOrder(prisma, user.id, [
+        {
+          productId: product.id,
+          productName: product.name,
+          unitPriceCents: product.priceCents,
+          quantity: 1,
+        },
+      ]);
+
+      await createPayment(prisma, order.id);
+
+      await expect(createPayment(prisma, order.id)).rejects.toThrow();
+    });
+
+    it('refuses to delete an order that has a payment (onDelete: Restrict)', async () => {
+      const user = await createUser(prisma);
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id);
+      const order = await createOrder(prisma, user.id, [
+        {
+          productId: product.id,
+          productName: product.name,
+          unitPriceCents: product.priceCents,
+          quantity: 1,
+        },
+      ]);
+
+      await createPayment(prisma, order.id);
+
+      await expect(
+        prisma.order.delete({ where: { id: order.id } }),
+      ).rejects.toThrow();
+
+      // Restrict, not Cascade: the payment must still be there afterwards.
+      const surviving = await prisma.payment.findUnique({
+        where: { orderId: order.id },
+      });
+
+      expect(surviving).not.toBeNull();
+    });
+
+    // Pins the Phase 4 change to assertStockConserved. A PAID order's stock
+    // was taken by checkout and is never given back, so the helper must keep
+    // counting it as held. If PAID drops out of that sum the assertion below
+    // reads 7 + 0 === 10 and fails an invariant that is not broken.
+    it('counts a PAID order as still holding its stock', async () => {
+      const user = await createUser(prisma);
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 10,
+      });
+
+      await createOrder(
+        prisma,
+        user.id,
+        [
+          {
+            productId: product.id,
+            productName: product.name,
+            unitPriceCents: product.priceCents,
+            quantity: 3,
+          },
+        ],
+        { status: OrderStatus.PAID },
+      );
+      // createOrder bypasses checkout, so the decrement checkout would have
+      // performed is applied by hand here.
+      await prisma.product.update({
+        where: { id: product.id },
+        data: { stockQuantity: { decrement: 3 } },
+      });
+
+      await assertStockConserved(prisma, product.id, 10);
     });
   });
 });

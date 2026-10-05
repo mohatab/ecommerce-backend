@@ -134,13 +134,18 @@ export class OrdersController {
     summary: 'Cancel a pending order and return its stock',
     description:
       'Idempotent: cancelling an already-cancelled order returns it ' +
-      'unchanged and does not restore stock a second time.',
+      'unchanged and does not restore stock a second time. Cancelling a ' +
+      'paid order returns 409 and restores no stock.',
   })
   @ApiResponse({ status: 200, description: 'The cancelled order' })
   @ApiResponse({ status: 401, description: 'Missing or invalid token' })
   @ApiResponse({
     status: 404,
     description: 'No such order, or it belongs to another user',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'The order is already paid and cannot be cancelled',
   })
   async cancel(
     @Req() request: Request,

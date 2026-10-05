@@ -13,20 +13,21 @@ A production-grade e-commerce backend, built as a portfolio project to demonstra
 - **JWT** (`@nestjs/jwt`) — authentication, HS256 access tokens
 - **Argon2id** (`@node-rs/argon2`) — password hashing
 - **`@nestjs/throttler`** — rate limiting
+- **`stripe`** — payment provider SDK, pinned API version
 - **Docker** — containerization
 - **Jest** — testing
 - **Swagger** — API documentation
 
 ## Project Status
 
-This project is being built incrementally, phase by phase. Current phase: **payments (Phase 4)**.
+This project is being built incrementally, phase by phase. Current phase: **Redis caching & BullMQ background jobs (Phase 5)**.
 
 - ✅ Project structure, config validation, Prisma wiring, health check, Swagger, Docker (Postgres)
 - ✅ Foundation: `/api/v1` versioning, pagination primitives, Prisma error mapping, e2e harness, CI
 - ✅ Authentication: register, login, refresh with rotation and reuse detection, logout, global fail-closed JWT guard, rate limiting
 - ✅ Products: public catalog reads, admin-only writes, role-based authorization, admin bootstrap
 - ✅ Cart & orders: transactional checkout, atomic stock decrement, idempotent order creation, cancellation with exactly-once stock restore
-- ⬜ Payments
+- ✅ Payments: provider-abstracted intent creation, idempotent initiation, signature-verified webhook as the only path to `PAID`
 - ⬜ Redis caching & BullMQ background jobs
 
 ## Getting Started
@@ -105,10 +106,14 @@ unversioned so infrastructure probes have a stable path.
 | `GET /api/v1/orders` | **Bearer** | 200 | The caller's orders only, paginated, newest first |
 | `GET /api/v1/orders/:id` | **Bearer** | 200 | The caller's order only; unknown id or another user's order → 404 |
 | `POST /api/v1/orders/:id/cancel` | **Bearer** | 200 | Idempotent; restores stock exactly once; unknown id or another user's order → 404 |
+| `POST /api/v1/orders/:id/payments` | **Bearer** | 201 / 200 | Creates a payment intent for the caller's own `PENDING` order, or returns the existing one — empty request body by design. 201 the first time, 200 on every replay with the same payment id, provider id and client secret; malformed id → 400; no token → 401; unknown id or another user's order → 404; the order is cancelled or already paid → 409; total outside the payable range or an unsupported currency → 422; provider unreachable → 502. **It does not complete the payment** |
+| `POST /api/v1/payments/webhook` | public (**signature**) | 200 | The provider's signed delivery, verified over the raw request body. The only path that marks an order `PAID`. Invalid or missing signature, or an unusable payload → 400; too many deliveries → 429; a database failure mid-transaction → 500 so the provider retries. Every other authentic delivery — unknown order, amount or currency mismatch, duplicate, already-paid, cancelled order — is **200** with the event recorded and nothing else changed |
 
 Authentication is **default-deny**: a route without an explicit `@Public()` marker
 is protected by a global JWT guard. Register, login, and refresh are rate-limited to
-5 requests/minute; everything else to 100/minute. The three public catalog reads
+5 requests/minute, the payment webhook to 300/minute (one provider's small IP set
+sends every delivery, and the global limit would throttle a legitimate burst);
+everything else to 100/minute. The three public catalog reads
 need no token; the admin product routes require a Bearer token for a user with the
 `ADMIN` role.
 
@@ -128,6 +133,44 @@ Phase 2 ships no category write route, so a category must exist before
 category directly in the database. A deactivated product (`DELETE`) is
 recoverable only by an operator who already holds its id: there is no admin
 list route to rediscover it once lost.
+
+### Payments
+
+Three environment variables, validated by Joi at boot like every other:
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `PAYMENT_PROVIDER` | always, no default | `stripe` or `fake`. Selects the adapter. **`fake` is rejected under `NODE_ENV=production`** — boot aborts |
+| `PAYMENT_API_KEY` | only when `PAYMENT_PROVIDER=stripe` | The provider credential. Use a test-mode key. Leave it unset (not empty) while the provider is `fake` |
+| `PAYMENT_WEBHOOK_SECRET` | always | The webhook HMAC secret, used by whichever adapter is selected. Minimum 16 characters; boot aborts if it is missing or empty |
+
+`fake` is a real, config-selected implementation — not a test double — and it
+signs and verifies in constant time exactly like the real path, so local
+development and the e2e suite exercise the same pipeline. It is simply never
+selectable in production.
+
+**Completing a payment.** This API creates a payment intent and returns its
+client secret; it never completes the payment. Boot with
+`PAYMENT_PROVIDER=stripe` and test-mode credentials, `POST /api/v1/orders`,
+then `POST /api/v1/orders/:id/payments`. Complete the returned intent with
+Stripe's own test tooling (CLI or test-mode dashboard). Stripe then delivers
+a signed `payment_intent.succeeded` to `POST /api/v1/payments/webhook`, and
+**only that verified webhook** marks the order `PAID`. `GET /api/v1/orders/:id`
+will then show `PAID`. There is deliberately no confirm endpoint.
+
+Repeating `POST /api/v1/orders/:id/payments` never creates a second intent: the
+persisted `payments` row, not the provider's idempotency key, is what makes that
+true, so it still holds after the provider's key-retention window has passed.
+
+**Not every `PENDING` order can be paid.** A total outside the payable range —
+below 50 or above 99,999,999 minor units — or a currency other than `USD`
+returns **422**, before any provider call. The maximum is the lowest documented
+provider tier, because the payment method is not known at initiation. Such an
+order stays valid and cancellable; see
+[`docs/deferred-limitations.md`](docs/deferred-limitations.md), which also
+records that a payment arriving after its order was cancelled is recorded but
+**not** refunded, and that nothing reconciles provider state against local state
+automatically.
 
 ### Creating the first administrator
 
@@ -175,7 +218,8 @@ src/
     users/            # User persistence (service-only, no controller)
     products/         # public catalog, admin writes, stock CAS methods
     cart/             # per-user cart, locked for checkout
-    orders/           # order reads, checkout transaction, cancellation
+    orders/           # order reads, checkout transaction, cancellation, markPaid
+    payments/         # intent initiation, provider adapters, signed webhook
 prisma/
   schema.prisma        # Prisma schema (datasource + generator)
   migrations/          # committed migrations, applied via prisma migrate deploy

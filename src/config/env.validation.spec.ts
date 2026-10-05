@@ -16,6 +16,9 @@ interface ValidatedEnv {
   JWT_SECRET: string;
   JWT_ACCESS_TTL: string;
   JWT_REFRESH_TTL: string;
+  PAYMENT_PROVIDER: string;
+  PAYMENT_API_KEY?: string;
+  PAYMENT_WEBHOOK_SECRET: string;
 }
 
 function validate(env: Record<string, unknown>): {
@@ -34,6 +37,8 @@ function validEnv(
   return {
     DATABASE_URL: 'postgresql://postgres:postgres@localhost:5432/ecommerce_dev',
     JWT_SECRET: 'x'.repeat(32),
+    PAYMENT_PROVIDER: 'fake',
+    PAYMENT_WEBHOOK_SECRET: 'y'.repeat(20),
     ...overrides,
   };
 }
@@ -212,6 +217,63 @@ describe('envValidationSchema', () => {
       const { error } = validate(validEnv({ ADMIN_PASSWORD: 'short' }));
 
       expect(rejectedKeys(error)).toContain('ADMIN_PASSWORD');
+    });
+  });
+
+  describe('payments configuration', () => {
+    it('rejects a missing PAYMENT_PROVIDER — there is no default', () => {
+      const env = validEnv();
+      delete env.PAYMENT_PROVIDER;
+
+      expect(validate(env).error?.message).toContain('PAYMENT_PROVIDER');
+    });
+
+    it('rejects an unknown provider name', () => {
+      expect(
+        validate(validEnv({ PAYMENT_PROVIDER: 'paypal' })).error?.message,
+      ).toContain('PAYMENT_PROVIDER');
+    });
+
+    it('rejects the fake provider under NODE_ENV=production', () => {
+      const { error } = validate(
+        validEnv({ NODE_ENV: 'production', PAYMENT_PROVIDER: 'fake' }),
+      );
+
+      expect(error?.message).toContain('PAYMENT_PROVIDER');
+    });
+
+    it('accepts the stripe provider under NODE_ENV=production when a key is set', () => {
+      const { error } = validate(
+        validEnv({
+          NODE_ENV: 'production',
+          PAYMENT_PROVIDER: 'stripe',
+          PAYMENT_API_KEY: 'sk_test_example',
+        }),
+      );
+
+      expect(error).toBeUndefined();
+    });
+
+    it('requires PAYMENT_API_KEY when the provider is stripe', () => {
+      const { error } = validate(validEnv({ PAYMENT_PROVIDER: 'stripe' }));
+
+      expect(error?.message).toContain('PAYMENT_API_KEY');
+    });
+
+    it('does not require PAYMENT_API_KEY when the provider is fake', () => {
+      expect(validate(validEnv()).error).toBeUndefined();
+    });
+
+    it('rejects a missing or too-short PAYMENT_WEBHOOK_SECRET', () => {
+      const missing = validEnv();
+      delete missing.PAYMENT_WEBHOOK_SECRET;
+
+      expect(validate(missing).error?.message).toContain(
+        'PAYMENT_WEBHOOK_SECRET',
+      );
+      expect(
+        validate(validEnv({ PAYMENT_WEBHOOK_SECRET: 'short' })).error?.message,
+      ).toContain('PAYMENT_WEBHOOK_SECRET');
     });
   });
 });

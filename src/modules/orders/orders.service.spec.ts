@@ -1,6 +1,6 @@
-import { NotFoundException } from '@nestjs/common';
-import { OrderStatus } from '@prisma/client';
-import { OrdersService } from './orders.service';
+import { ConflictException, NotFoundException } from '@nestjs/common';
+import { OrderStatus, Prisma } from '@prisma/client';
+import { MarkPaidOutcome, OrdersService } from './orders.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { ProductsService } from '../products/products.service';
@@ -213,5 +213,194 @@ describe('OrdersService.cancel', () => {
       id: 'order-1',
     });
     expect(products.incrementStock).not.toHaveBeenCalled();
+  });
+
+  it('409s on a PAID order and restores no stock', async () => {
+    txMock.order.updateMany.mockResolvedValue({ count: 0 });
+    txMock.order.findFirst.mockResolvedValue({
+      id: 'order-1',
+      status: OrderStatus.PAID,
+      items: [],
+    });
+
+    await expect(service.cancel('user-1', 'order-1')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    // The whole point of the branch: a paid order's stock is never given back.
+    expect(products.incrementStock).not.toHaveBeenCalled();
+  });
+
+  it('leaves the CAS predicate carrying status PENDING on the PAID path', async () => {
+    txMock.order.updateMany.mockResolvedValue({ count: 0 });
+    txMock.order.findFirst.mockResolvedValue({
+      id: 'order-1',
+      status: OrderStatus.PAID,
+      items: [],
+    });
+
+    await expect(service.cancel('user-1', 'order-1')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(txMock.order.updateMany.mock.calls[0][0].where).toEqual({
+      id: 'order-1',
+      userId: 'user-1',
+      status: OrderStatus.PENDING,
+    });
+  });
+});
+
+describe('OrdersService.markPaid', () => {
+  let service: OrdersService;
+  let tx: {
+    order: {
+      updateMany: jest.Mock<Promise<{ count: number }>, UpdateManyArgs>;
+      findUnique: jest.Mock<Promise<{ status: OrderStatus } | null>, [unknown]>;
+    };
+  };
+  // A real recording mock, not `{}`: markPaid must operate through the tx it
+  // was handed, and moving either the write or the classification read onto
+  // this.prisma has to fail by ASSERTION here, not by crashing on undefined.
+  let basePrisma: {
+    order: {
+      updateMany: jest.Mock<Promise<{ count: number }>, [unknown]>;
+      update: jest.Mock<Promise<unknown>, [unknown]>;
+      findUnique: jest.Mock<Promise<unknown>, [unknown]>;
+    };
+    $transaction: jest.Mock<Promise<unknown>, [unknown]>;
+  };
+
+  const expectBasePrismaUntouched = (): void => {
+    expect(basePrisma.order.updateMany).not.toHaveBeenCalled();
+    expect(basePrisma.order.update).not.toHaveBeenCalled();
+    expect(basePrisma.order.findUnique).not.toHaveBeenCalled();
+    expect(basePrisma.$transaction).not.toHaveBeenCalled();
+  };
+
+  beforeEach(() => {
+    tx = {
+      order: {
+        updateMany: jest
+          .fn<Promise<{ count: number }>, UpdateManyArgs>()
+          .mockResolvedValue({ count: 1 }),
+        findUnique: jest
+          .fn<Promise<{ status: OrderStatus } | null>, [unknown]>()
+          .mockResolvedValue(null),
+      },
+    };
+    basePrisma = {
+      order: {
+        updateMany: jest
+          .fn<Promise<{ count: number }>, [unknown]>()
+          .mockResolvedValue({ count: 1 }),
+        update: jest.fn<Promise<unknown>, [unknown]>().mockResolvedValue({}),
+        findUnique: jest
+          .fn<Promise<unknown>, [unknown]>()
+          .mockResolvedValue({ status: OrderStatus.PENDING }),
+      },
+      $transaction: jest
+        .fn<Promise<unknown>, [unknown]>()
+        .mockResolvedValue(undefined),
+    };
+
+    service = new OrdersService(
+      basePrisma as unknown as PrismaService,
+      {} as unknown as ProductsService,
+    );
+  });
+
+  it('claims the order with a PENDING predicate and returns "paid"', async () => {
+    const outcome = await service.markPaid(
+      tx as unknown as Prisma.TransactionClient,
+      'order-1',
+    );
+
+    expect(outcome).toBe('paid');
+    expect(tx.order.updateMany.mock.calls[0][0]).toEqual({
+      where: { id: 'order-1', status: OrderStatus.PENDING },
+      data: { status: OrderStatus.PAID },
+    });
+  });
+
+  // The CAS miss is classified by a follow-up read, exactly as cancel() does.
+  it('returns "already-paid" when the CAS misses and the order is PAID', async () => {
+    tx.order.updateMany.mockResolvedValue({ count: 0 });
+    tx.order.findUnique.mockResolvedValue({ status: OrderStatus.PAID });
+
+    expect(
+      await service.markPaid(tx as unknown as Prisma.TransactionClient, 'o'),
+    ).toBe('already-paid');
+  });
+
+  it('returns "cancelled" when the CAS misses and the order is CANCELLED', async () => {
+    tx.order.updateMany.mockResolvedValue({ count: 0 });
+    tx.order.findUnique.mockResolvedValue({ status: OrderStatus.CANCELLED });
+
+    expect(
+      await service.markPaid(tx as unknown as Prisma.TransactionClient, 'o'),
+    ).toBe('cancelled');
+  });
+
+  it('returns "not-found" for an unknown order, reading through the same tx', async () => {
+    tx.order.updateMany.mockResolvedValue({ count: 0 });
+    tx.order.findUnique.mockResolvedValue(null);
+
+    expect(
+      await service.markPaid(tx as unknown as Prisma.TransactionClient, 'o'),
+    ).toBe('not-found');
+    expect(tx.order.findUnique.mock.calls[0][0]).toEqual({
+      where: { id: 'o' },
+      select: { status: true },
+    });
+  });
+
+  // It is called from a webhook. Throwing would surface as a 404 to the
+  // provider, which reads that as "never retry".
+  it('never throws on any of the CAS-miss paths, and pins each outcome', async () => {
+    const cases: Array<{
+      row: { status: OrderStatus } | null;
+      outcome: MarkPaidOutcome;
+    }> = [
+      { row: { status: OrderStatus.PAID }, outcome: 'already-paid' },
+      { row: { status: OrderStatus.CANCELLED }, outcome: 'cancelled' },
+      { row: null, outcome: 'not-found' },
+    ];
+
+    for (const { row, outcome } of cases) {
+      tx.order.updateMany.mockResolvedValue({ count: 0 });
+      tx.order.findUnique.mockResolvedValue(row);
+
+      // The assertion is the exact outcome, not expect.any(String): the
+      // absence of a throw is necessary but says nothing about the answer.
+      await expect(
+        service.markPaid(tx as unknown as Prisma.TransactionClient, 'o'),
+      ).resolves.toBe(outcome);
+    }
+  });
+
+  // It writes through the CALLER's transaction, never this.prisma — the same
+  // rule decrementStock(tx, …) follows. Both directions are asserted: the tx
+  // WAS used, and every base-prisma order method was NOT.
+  it('uses only the transaction client it was given, on the CAS-hit path', async () => {
+    await service.markPaid(
+      tx as unknown as Prisma.TransactionClient,
+      'order-1',
+    );
+
+    expect(tx.order.updateMany).toHaveBeenCalledTimes(1);
+    expectBasePrismaUntouched();
+  });
+
+  it('uses only the transaction client it was given, on the CAS-miss path', async () => {
+    tx.order.updateMany.mockResolvedValue({ count: 0 });
+    tx.order.findUnique.mockResolvedValue({ status: OrderStatus.PAID });
+
+    await service.markPaid(
+      tx as unknown as Prisma.TransactionClient,
+      'order-1',
+    );
+
+    expect(tx.order.updateMany).toHaveBeenCalledTimes(1);
+    expect(tx.order.findUnique).toHaveBeenCalledTimes(1);
+    expectBasePrismaUntouched();
   });
 });

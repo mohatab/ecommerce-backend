@@ -38,6 +38,16 @@ describe('routing and validation (e2e)', () => {
     it('does not serve normal controllers without a version', async () => {
       await request(app.getHttpServer()).get('/api/ping').expect(404);
     });
+
+    // PaymentsController shares the `orders` prefix with OrdersController
+    // (spec §9.1). 401, not 404, is the proof the sub-path resolved: the route
+    // matched and the global JwtAuthGuard rejected it. A 404 here would mean
+    // one controller had shadowed the other.
+    it('resolves POST /api/v1/orders/:id/payments on its own controller', async () => {
+      await request(app.getHttpServer())
+        .post('/api/v1/orders/0195f0a0-0000-7000-8000-0000000000ff/payments')
+        .expect(401);
+    });
   });
 
   describe('validation pipe', () => {

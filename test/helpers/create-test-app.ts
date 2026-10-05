@@ -3,7 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import { App } from 'supertest/types';
 import { AppModule } from '../../src/app.module';
-import { configureApp } from '../../src/bootstrap';
+import { configureApp, NEST_APP_OPTIONS } from '../../src/bootstrap';
 
 export interface CreateTestAppOptions {
   /**
@@ -45,7 +45,10 @@ export async function createTestApp(
 
   const moduleFixture: TestingModule = await builder.compile();
 
-  const app = moduleFixture.createNestApplication<INestApplication<App>>();
+  const app =
+    moduleFixture.createNestApplication<INestApplication<App>>(
+      NEST_APP_OPTIONS,
+    );
   configureApp(app);
   await app.init();
 

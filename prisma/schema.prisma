@@ -77,6 +77,12 @@ model Product {
 enum OrderStatus {
   PENDING
   CANCELLED
+  PAID
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
 }
 
 model Cart {
@@ -114,6 +120,7 @@ model Order {
   currency       String
   idempotencyKey String      @map("idempotency_key")
   cancelledAt    DateTime?   @map("cancelled_at")
+  payment        Payment?
   items          OrderItem[]
   createdAt      DateTime    @default(now()) @map("created_at")
   updatedAt      DateTime    @updatedAt @map("updated_at")
@@ -138,4 +145,27 @@ model OrderItem {
   @@unique([orderId, productId])
   @@index([productId])
   @@map("order_items")
+}
+
+model Payment {
+  id                String        @id @default(uuid(7))
+  orderId           String        @unique @map("order_id")
+  order             Order         @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  providerPaymentId String        @unique @map("provider_payment_id")
+  status            PaymentStatus @default(PENDING)
+  succeededAt       DateTime?     @map("succeeded_at")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  @@map("payments")
+}
+
+model PaymentEvent {
+  id              String   @id @default(uuid(7))
+  providerEventId String   @unique @map("provider_event_id")
+  type            String
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("payment_events")
 }
