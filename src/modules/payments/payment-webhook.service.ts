@@ -91,15 +91,46 @@ export class PaymentWebhookService {
         // 4. The ONLY writer of PAID, and it lives in OrdersModule (D9).
         const outcome = await this.ordersService.markPaid(tx, order.id);
 
-        if (outcome === 'cancelled') {
-          // The reconciliation state: money was taken for an order that was
-          // already cancelled and whose stock has been restored. Phase 4 does
-          // NOT refund it (docs/deferred-limitations.md, spec §17.1). Recorded
-          // loudly and acknowledged, so the provider stops retrying.
-          this.logger.error(
-            `Payment succeeded for CANCELLED order ${order.id} ` +
-              `(event ${event.providerEventId}); manual refund required`,
-          );
+        // Every outcome is named, in the same spirit as markPaid's switch:
+        // a chain of `if`s let Phase 5's 'expired' fall through silently,
+        // producing no log and no observable behaviour at all. The two
+        // success arms are explicitly silent — an error log on them would
+        // make the error level useless for the two arms that need it.
+        switch (outcome) {
+          case 'paid':
+          case 'already-paid':
+            break;
+          case 'cancelled':
+            // The reconciliation state: money was taken for an order that was
+            // already cancelled and whose stock has been restored. Phase 4
+            // does NOT refund it (docs/deferred-limitations.md, spec §17.1).
+            // Recorded loudly and acknowledged, so the provider stops
+            // retrying.
+            this.logger.error(
+              `Payment succeeded for CANCELLED order ${order.id} ` +
+                `(event ${event.providerEventId}); manual refund required`,
+            );
+            break;
+          // Phase 5, spec §4.3. Same shape as 'cancelled' — log loudly,
+          // mutate nothing, return 200 — but its own message, because the
+          // operator response differs: a lapse is a system-initiated release
+          // of inventory that has since been resold, a cancel was a customer
+          // action.
+          case 'expired':
+            this.logger.error(
+              `Payment succeeded for order ${order.id} after it expired ` +
+                `(event ${event.providerEventId}); stock was already restored ` +
+                `and manual refund is required`,
+            );
+            break;
+          case 'not-found':
+            // Unreachable: the order was read above in this same tx. Named
+            // rather than defaulted, so the next outcome is a decision.
+            this.logger.error(
+              `Order ${order.id} vanished between the read and the CAS ` +
+                `(event ${event.providerEventId})`,
+            );
+            break;
         }
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },

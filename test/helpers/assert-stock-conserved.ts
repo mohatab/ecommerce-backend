@@ -29,6 +29,14 @@ export async function assertStockConserved(
   // cancel a paid order (spec §4.3). Only CANCELLED orders drop out of the
   // sum, because their stock went back to the product. Omitting PAID here
   // makes every paid-order test fail an invariant that is not broken.
+  //
+  // Phase 5: EXPIRED is likewise absent, and that is a decision, not an
+  // omission. The expiry sweep restores every unit before it commits the
+  // transition (spec §4.5), so an EXPIRED order holds nothing — including it
+  // here would make every expiry look like an inventory leak, double-counting
+  // units that are already back on the product row. The next OrderStatus
+  // member needs the same deliberate call: does it hold its units, or has it
+  // given them back?
   const reserved = await prisma.orderItem.aggregate({
     where: {
       productId,

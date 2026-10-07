@@ -391,6 +391,117 @@ describe('Orders (e2e)', () => {
       });
       expect(after.stockQuantity).toBe(10);
     });
+
+    /**
+     * Phase 5, spec §4.4. EXPIRED is terminal and reached here through a
+     * fixture, not a transition: nothing in the codebase performs
+     * PENDING → EXPIRED until Task 4 ships the sweep, and the transition's
+     * own CAS tests belong to that task.
+     *
+     * Dropping the EXPIRED branch from cancel()'s CAS-miss classifier fails
+     * this on two counts: the response becomes a 200 (falling through to the
+     * already-cancelled path) and the body reports a cancellation that never
+     * happened.
+     */
+    it('returns 409 on an EXPIRED order, restores no stock, and leaves the row untouched', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 10,
+      });
+      const expiredAt = new Date();
+      const order = await createOrder(
+        prisma,
+        userId,
+        [
+          {
+            productId: product.id,
+            productName: product.name,
+            unitPriceCents: product.priceCents,
+            quantity: 2,
+          },
+        ],
+        { status: OrderStatus.EXPIRED, expiredAt },
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/orders/${order.id}/cancel`)
+        .set('Authorization', auth())
+        .expect(409);
+
+      expect((response.body as { message: string }).message).toBe(
+        'Order has expired',
+      );
+
+      // No second restoration: the sweep already returned these units, which
+      // is why the factory's undecremented 10 is the correct resting value.
+      const after = await prisma.product.findUniqueOrThrow({
+        where: { id: product.id },
+      });
+      expect(after.stockQuantity).toBe(10);
+
+      // Conservation with an EXPIRED order in the table. Counting its 2 units
+      // as held would make this 12 !== 10 — the guard on
+      // assertStockConserved's status predicate.
+      await assertStockConserved(prisma, product.id, 10);
+
+      const reread = await prisma.order.findUniqueOrThrow({
+        where: { id: order.id },
+      });
+      expect(reread.status).toBe(OrderStatus.EXPIRED);
+      expect(reread.cancelledAt).toBeNull();
+      expect(reread.expiredAt).toEqual(expiredAt);
+    });
+
+    // The three terminal states answer a cancel in three different ways, and
+    // the differences are the point. Folding EXPIRED into either neighbour
+    // fails here: into CANCELLED it becomes a 200, into PAID it reports the
+    // wrong reason to the customer.
+    it('answers a cancel differently for EXPIRED, PAID, and CANCELLED', async () => {
+      const category = await createCategory(prisma);
+      const product = await createProduct(prisma, category.id, {
+        stockQuantity: 30,
+      });
+
+      const orderIn = async (status: OrderStatus): Promise<string> => {
+        const order = await createOrder(
+          prisma,
+          userId,
+          [
+            {
+              productId: product.id,
+              productName: product.name,
+              unitPriceCents: product.priceCents,
+              quantity: 1,
+            },
+          ],
+          { status },
+        );
+
+        return order.id;
+      };
+
+      const cancel = async (
+        orderId: string,
+      ): Promise<{ status: number; message: string | undefined }> => {
+        const response = await request(app.getHttpServer())
+          .post(`/api/v1/orders/${orderId}/cancel`)
+          .set('Authorization', auth());
+
+        return {
+          status: response.status,
+          message: (response.body as { message?: string }).message,
+        };
+      };
+
+      const expired = await cancel(await orderIn(OrderStatus.EXPIRED));
+      const paid = await cancel(await orderIn(OrderStatus.PAID));
+      const cancelled = await cancel(await orderIn(OrderStatus.CANCELLED));
+
+      expect(expired).toEqual({ status: 409, message: 'Order has expired' });
+      expect(paid).toEqual({ status: 409, message: 'Order is already paid' });
+      expect(cancelled.status).toBe(200);
+      expect(expired.message).not.toBe(paid.message);
+    });
   });
 
   // markPaid has no HTTP route until Task 7, but it is reachable here exactly
@@ -453,6 +564,28 @@ describe('Orders (e2e)', () => {
       });
       expect(reread.status).toBe(OrderStatus.CANCELLED);
       expect(reread.cancelledAt).toEqual(cancelledAt);
+    });
+
+    // Phase 5, spec §4.3. The outcome the webhook needs in order to log the
+    // lapse as what it is. Reported distinctly from 'cancelled', and the
+    // transition is still refused: removing the EXPIRED arm from markPaid's
+    // switch stops the build, and folding it into the CANCELLED arm fails
+    // this test's first assertion.
+    it('leaves an EXPIRED order expired and reports expired', async () => {
+      const orderId = await pendingOrder();
+      const expiredAt = new Date();
+      await prisma.order.update({
+        where: { id: orderId },
+        data: { status: OrderStatus.EXPIRED, expiredAt },
+      });
+
+      expect(await markPaid(orderId)).toBe('expired');
+
+      const reread = await prisma.order.findUniqueOrThrow({
+        where: { id: orderId },
+      });
+      expect(reread.status).toBe(OrderStatus.EXPIRED);
+      expect(reread.expiredAt).toEqual(expiredAt);
     });
 
     it('reports not-found for an unknown order without throwing', async () => {

@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { OrderStatus, PaymentStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrdersService, MarkPaidOutcome } from '../orders/orders.service';
@@ -228,12 +229,85 @@ describe('PaymentWebhookService.apply', () => {
       'paid',
       'already-paid',
       'cancelled',
+      'expired',
       'not-found',
     ])('never throws on outcome %s', async (outcome) => {
       orders.markPaid.mockResolvedValue(outcome);
 
       await expect(service.apply(EVENT)).resolves.toBeUndefined();
     });
+
+    /**
+     * Phase 5. The failure this pins is a SILENT one: before the switch
+     * existed, 'expired' fell past `if (outcome === 'cancelled')` and
+     * produced no log at all, so a payment landing on a system-released
+     * order was invisible. Asserting the error log is the only observable
+     * difference — nothing is mutated on this path by design.
+     *
+     * tx.order exposes only findUnique, so any mutation attempt would throw
+     * "is not a function"; markPaid is mocked and never reaches the row.
+     */
+    it('logs at error level and mutates nothing when the order expired', async () => {
+      const errorSpy = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+      orders.markPaid.mockResolvedValue('expired');
+
+      try {
+        await expect(service.apply(EVENT)).resolves.toBeUndefined();
+
+        expect(errorSpy).toHaveBeenCalledTimes(1);
+        const message = String(errorSpy.mock.calls[0][0]);
+        // Names the lapse, not a cancellation: the operator response differs.
+        expect(message).toContain('expired');
+        expect(message).toContain('order-1');
+        expect(message).toContain('evt_1');
+        expect(message).not.toContain('CANCELLED');
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    // The distinction, asserted directly: folding 'expired' into the
+    // 'cancelled' arm would make these two messages identical.
+    it('uses a different message for expired than for cancelled', async () => {
+      const errorSpy = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+
+      try {
+        orders.markPaid.mockResolvedValue('cancelled');
+        await service.apply(EVENT);
+        orders.markPaid.mockResolvedValue('expired');
+        await service.apply(EVENT);
+
+        expect(String(errorSpy.mock.calls[0][0])).not.toBe(
+          String(errorSpy.mock.calls[1][0]),
+        );
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    // The success paths must stay silent at error level. An over-eager
+    // switch that logged on every outcome would make the error log useless.
+    it.each<MarkPaidOutcome>(['paid', 'already-paid'])(
+      'logs no error on the success outcome %s',
+      async (outcome) => {
+        const errorSpy = jest
+          .spyOn(Logger.prototype, 'error')
+          .mockImplementation(() => undefined);
+        orders.markPaid.mockResolvedValue(outcome);
+
+        try {
+          await service.apply(EVENT);
+
+          expect(errorSpy).not.toHaveBeenCalled();
+        } finally {
+          errorSpy.mockRestore();
+        }
+      },
+    );
   });
 
   describe('transaction boundary', () => {

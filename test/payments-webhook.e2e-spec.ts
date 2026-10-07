@@ -420,6 +420,55 @@ describe('Payment webhook — state application (e2e)', () => {
     expect(payment.status).toBe('SUCCEEDED');
   });
 
+  /**
+   * Phase 5, spec §4.3. The same shape as the CANCELLED case above, and
+   * reached the same deliberate way: the transition under test is the one
+   * that must NOT happen, so EXPIRED is set with a direct write.
+   *
+   * Before the webhook's outcome `switch`, 'expired' fell past
+   * `if (outcome === 'cancelled')` and this path had no observable behaviour
+   * whatsoever. The order row is the assertion that it still mutates
+   * nothing; the error log itself is pinned in the unit spec, where the
+   * logger can be spied on.
+   */
+  it('leaves an EXPIRED order expired but records the payment as SUCCEEDED', async () => {
+    const { order, product } = await paidCandidate();
+
+    // The sweep restored this order's unit before committing the transition
+    // (spec §4.5), so undo paidCandidate's mirrored decrement.
+    await prisma.product.update({
+      where: { id: product.id },
+      data: { stockQuantity: 10 },
+    });
+    const expiredAt = new Date();
+    await prisma.order.update({
+      where: { id: order.id },
+      data: { status: 'EXPIRED', expiredAt },
+    });
+
+    await send(eventFor(order)).expect(200);
+
+    const reread = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+    });
+    const payment = await prisma.payment.findUniqueOrThrow({
+      where: { orderId: order.id },
+    });
+
+    expect(reread.status).toBe('EXPIRED');
+    expect(reread.expiredAt).toEqual(expiredAt);
+    expect(reread.cancelledAt).toBeNull();
+    expect(payment.status).toBe('SUCCEEDED');
+
+    // The webhook touches no stock on any path, and an EXPIRED order holds
+    // none: 10 on the row + 0 held === 10 initial.
+    const after = await prisma.product.findUniqueOrThrow({
+      where: { id: product.id },
+    });
+    expect(after.stockQuantity).toBe(10);
+    await assertStockConserved(prisma, product.id, 10);
+  });
+
   it('promotes a PENDING payment row created by initiation', async () => {
     const { order, user } = await paidCandidate();
     const token = await app.get(TokenService).signAccessToken(user);
