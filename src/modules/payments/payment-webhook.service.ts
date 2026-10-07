@@ -97,6 +97,9 @@ export class PaymentWebhookService {
         // success arms are explicitly silent — an error log on them would
         // make the error level useless for the two arms that need it.
         switch (outcome) {
+          // The success paths, DELIBERATELY SILENT — handled, not forgotten.
+          // An error log here would make the level useless for the two arms
+          // below, which are the ones an operator has to act on.
           case 'paid':
           case 'already-paid':
             break;
@@ -131,6 +134,30 @@ export class PaymentWebhookService {
                 `(event ${event.providerEventId})`,
             );
             break;
+          /**
+           * A COMPILE-TIME TRIPWIRE, NOT A SILENT CATCH-ALL. Do not "clean
+           * this up" — it is the exact opposite of the fallback `default`
+           * that spec §4.3 forbids in markPaid, and deleting it reintroduces
+           * the bug this switch was written to fix.
+           *
+           * The `never` assignment fails the build if a sixth
+           * MarkPaidOutcome is added, which markPaid's own switch does NOT
+           * catch: that one is exhaustive over OrderStatus, so an outcome
+           * added for a non-status reason widens this union with no error
+           * anywhere and would fall through here unhandled.
+           *
+           * It LOGS and does not throw. A future slip must not 500 the
+           * webhook — that is what makes the provider retry forever.
+           */
+          default: {
+            const _exhaustive: never = outcome;
+
+            this.logger.error(
+              `Unhandled markPaid outcome ${String(_exhaustive)} for order ` +
+                `${order.id} (event ${event.providerEventId})`,
+            );
+            break;
+          }
         }
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },

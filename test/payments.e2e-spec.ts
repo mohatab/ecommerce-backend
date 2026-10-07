@@ -298,6 +298,27 @@ describe('Payment initiation (e2e)', () => {
       await initiate(order.id, token).expect(409);
       expect(provider.createCountFor(order.id)).toBe(0);
     });
+
+    // Phase 5. Unreachable until the expiry sweep ships, which is exactly
+    // why it is guarded now: the hole would go live inside the change that
+    // activates it. EXPIRED is reached by fixture, as the terminal state it
+    // is — no transition is performed here.
+    it('409s for an expired order, creating no intent', async () => {
+      const { order, token } = await payableOrder();
+
+      await prisma.order.update({
+        where: { id: order.id },
+        data: { status: 'EXPIRED', expiredAt: new Date() },
+      });
+
+      const response = await initiate(order.id, token).expect(409);
+
+      expect((response.body as { message: string }).message).toBe(
+        'Order has expired',
+      );
+      expect(provider.createCountFor(order.id)).toBe(0);
+      expect(await prisma.payment.count()).toBe(0);
+    });
   });
 
   // A1, deterministic half.

@@ -146,6 +146,43 @@ describe('PaymentsService.initiate', () => {
       ).rejects.toBeInstanceOf(ConflictException);
       expect(provider.createPayment).not.toHaveBeenCalled();
     });
+
+    /**
+     * Phase 5. The money-path half of the EXPIRED lifecycle decision, and
+     * the one that matters most: without this guard an EXPIRED order is
+     * treated exactly as PENDING here, falls through to createPayment, and
+     * takes money for inventory the expiry sweep already put back on sale.
+     *
+     * 409, matching the two guards above rather than §6.3's 422: the request
+     * is well-formed and the amount is fine — it is the order's terminal
+     * state, which the caller did not cause, that refuses it.
+     */
+    it('409s for an expired order and creates no intent', async () => {
+      prisma.order.findFirst.mockResolvedValue({
+        ...ORDER,
+        status: OrderStatus.EXPIRED,
+      });
+
+      await expect(service.initiate('user-1', 'order-1')).rejects.toThrow(
+        'Order has expired',
+      );
+      await expect(
+        service.initiate('user-1', 'order-1'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      // The assertion with the teeth: the refusal must happen ABOVE the
+      // provider call, not merely somewhere in the method.
+      expect(provider.createPayment).not.toHaveBeenCalled();
+    });
+
+    // EXPIRED must never be treated as PENDING, and PENDING must keep
+    // working. Pinned together so a guard written with the wrong comparison
+    // (or placed after the provider call) cannot pass both halves.
+    it('still initiates for a PENDING order, so the guard is not over-broad', async () => {
+      await expect(
+        service.initiate('user-1', 'order-1'),
+      ).resolves.toBeDefined();
+      expect(provider.createPayment).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('amount integrity', () => {
