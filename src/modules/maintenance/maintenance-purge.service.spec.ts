@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppConfig } from '../../config/configuration';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -104,5 +105,35 @@ describe('MaintenancePurgeService', () => {
 
     expect(prisma.refreshToken.deleteMany).toHaveBeenCalledTimes(1);
     expect(counts).toMatchObject({ affected: 2, failed: 1 });
+  });
+
+  describe('saturation', () => {
+    let warn: jest.SpyInstance<void, [message: unknown]>;
+
+    beforeEach(() => {
+      warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+    });
+
+    afterEach(() => warn.mockRestore());
+
+    it('warns naming the table when a batch comes back full', async () => {
+      // take is 7
+      prisma.paymentEvent.findMany.mockResolvedValue(
+        Array.from({ length: 7 }, (_, i) => ({ id: `e${i}` })),
+      );
+
+      await service.run();
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain('payment_events');
+    });
+
+    it('does not warn when every batch is partial', async () => {
+      await service.run();
+
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 });

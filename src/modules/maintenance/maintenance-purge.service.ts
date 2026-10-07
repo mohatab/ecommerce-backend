@@ -53,6 +53,14 @@ export class MaintenancePurgeService {
     return counts;
   }
 
+  private warnIfSaturated(table: string, found: number, take: number): void {
+    if (found === take) {
+      this.logger.warn(
+        `Purge of ${table} filled its batch of ${take}; more expired rows remain for the next tick`,
+      );
+    }
+  }
+
   private cutoff(days: number): Date {
     return new Date(Date.now() - days * DAY_MS);
   }
@@ -75,12 +83,16 @@ export class MaintenancePurgeService {
         }),
       ),
     };
+    const take = this.config.get('maintenance.purgeBatchSize', {
+      infer: true,
+    });
     const rows = await this.prisma.refreshToken.findMany({
       where: { expiresAt },
       orderBy: { expiresAt: 'asc' },
-      take: this.config.get('maintenance.purgeBatchSize', { infer: true }),
+      take,
       select: { id: true },
     });
+    this.warnIfSaturated('refresh_tokens', rows.length, take);
     const { count } = await this.prisma.refreshToken.deleteMany({
       where: { id: { in: rows.map((r) => r.id) }, expiresAt },
     });
@@ -104,12 +116,16 @@ export class MaintenancePurgeService {
         }),
       ),
     };
+    const take = this.config.get('maintenance.purgeBatchSize', {
+      infer: true,
+    });
     const rows = await this.prisma.paymentEvent.findMany({
       where: { createdAt },
       orderBy: { createdAt: 'asc' },
-      take: this.config.get('maintenance.purgeBatchSize', { infer: true }),
+      take,
       select: { id: true },
     });
+    this.warnIfSaturated('payment_events', rows.length, take);
     const { count } = await this.prisma.paymentEvent.deleteMany({
       where: { id: { in: rows.map((r) => r.id) }, createdAt },
     });
