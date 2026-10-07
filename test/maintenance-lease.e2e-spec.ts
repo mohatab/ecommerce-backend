@@ -122,13 +122,64 @@ describe('MaintenanceLease exclusion (e2e)', () => {
     expect(after.stockQuantity).toBe(5);
   });
 
+  it('rolls back the fence own heartbeat write, so the check is INSIDE the transaction', async () => {
+    // THE control for the same-transaction invariant, and the only test in
+    // this file that discriminates on it.
+    //
+    // Every other test here passes even when assertHeld is patched to use
+    // `this.prisma` instead of `tx` — verified empirically, all 8 of them —
+    // because the throw happens inside the $transaction callback either way
+    // and Prisma rolls the outer transaction back regardless of which
+    // connection the check ran on.
+    //
+    // assertHeld's OWN write is the observable difference. It bumps
+    // heartbeatAt, so:
+    //   with `tx`          -> the bump is part of the transaction and ROLLS BACK
+    //   with `this.prisma` -> it lands on a separate autocommit connection and
+    //                         COMMITS even though the transaction rolled back
+    //
+    // The lease is held and unexpired here, so assertHeld SUCCEEDS; the
+    // transaction then fails for an unrelated reason. heartbeatAt must be
+    // untouched afterwards.
+    const a = newInstance();
+    expect(await a.acquire(MaintenanceJobName.ORDER_EXPIRY)).toBe('acquired');
+
+    // Pinned to the epoch rather than read back from acquire(): heartbeat_at
+    // is TIMESTAMP(3), and a bump landing in the same millisecond as the
+    // acquire would make the assertion silently vacuous. expiresAt stays in
+    // the future so the fence passes.
+    const pinned = new Date(0);
+    await prisma.maintenanceLease.update({
+      where: { job: MaintenanceJobName.ORDER_EXPIRY },
+      data: { heartbeatAt: pinned, expiresAt: new Date(Date.now() + 600_000) },
+    });
+
+    await expect(
+      prisma.$transaction(async (tx) => {
+        await a.assertHeld(tx, MaintenanceJobName.ORDER_EXPIRY);
+        throw new Error('unrelated failure after a successful fence');
+      }),
+    ).rejects.toThrow('unrelated failure after a successful fence');
+
+    const lease = await prisma.maintenanceLease.findUniqueOrThrow({
+      where: { job: MaintenanceJobName.ORDER_EXPIRY },
+    });
+
+    // Fails exactly when the fence ran outside the caller's transaction.
+    expect(lease.heartbeatAt).toEqual(pinned);
+  });
+
   it('rolls back a write already made before the fence failed', async () => {
-    // The discriminating case. In the test above the mutation follows
-    // assertHeld, so a fencing check made in a SEPARATE call before the
-    // transaction would leave stock untouched too and the test would pass for
-    // the wrong reason. Here the write happens first, so the only thing that
-    // can leave 5 in the database is the transaction actually rolling back —
-    // which is only possible because the check shares that transaction.
+    // Rules out a fencing check made in a SEPARATE CALL BEFORE the
+    // transaction: in the test above the mutation follows assertHeld, so such
+    // a check would throw before the write ever ran and leave stock untouched
+    // too. Here the write happens first, so only an actual rollback can leave
+    // 5 in the database.
+    //
+    // It does NOT rule out a check made outside the transaction on another
+    // connection — the throw still unwinds the callback and Prisma still rolls
+    // back. That case is covered by the heartbeat control above, and by this
+    // file's first test only in combination with it.
     const a = newInstance();
     const b = newInstance();
     expect(await a.acquire(MaintenanceJobName.ORDER_EXPIRY)).toBe('acquired');
