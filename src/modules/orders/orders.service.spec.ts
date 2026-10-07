@@ -230,6 +230,27 @@ describe('OrdersService.cancel', () => {
     expect(products.incrementStock).not.toHaveBeenCalled();
   });
 
+  it('409s on an EXPIRED order and restores no stock a second time', async () => {
+    // Phase 5. The expiry sweep already restored this order's stock, so the
+    // already-cancelled path's idempotent 200 would be wrong twice over: it
+    // would read as "we cancelled it for you", and a restore here would hand
+    // back units the sweep has already returned to the catalogue.
+    txMock.order.updateMany.mockResolvedValue({ count: 0 });
+    txMock.order.findFirst.mockResolvedValue({
+      id: 'order-1',
+      status: OrderStatus.EXPIRED,
+      items: [],
+    });
+
+    await expect(service.cancel('user-1', 'order-1')).rejects.toThrow(
+      'Order has expired',
+    );
+    await expect(service.cancel('user-1', 'order-1')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(products.incrementStock).not.toHaveBeenCalled();
+  });
+
   it('leaves the CAS predicate carrying status PENDING on the PAID path', async () => {
     txMock.order.updateMany.mockResolvedValue({ count: 0 });
     txMock.order.findFirst.mockResolvedValue({
@@ -340,6 +361,19 @@ describe('OrdersService.markPaid', () => {
     ).toBe('cancelled');
   });
 
+  it('returns "expired" when the CAS misses and the order is EXPIRED', async () => {
+    // Phase 5. Distinct from 'cancelled': a payment arriving for an order the
+    // expiry sweep already released is the one case where stock went back on
+    // sale while money moved, and the webhook needs to tell it apart to log it
+    // as what it is. The transition is still refused either way.
+    tx.order.updateMany.mockResolvedValue({ count: 0 });
+    tx.order.findUnique.mockResolvedValue({ status: OrderStatus.EXPIRED });
+
+    expect(
+      await service.markPaid(tx as unknown as Prisma.TransactionClient, 'o'),
+    ).toBe('expired');
+  });
+
   it('returns "not-found" for an unknown order, reading through the same tx', async () => {
     tx.order.updateMany.mockResolvedValue({ count: 0 });
     tx.order.findUnique.mockResolvedValue(null);
@@ -362,6 +396,7 @@ describe('OrdersService.markPaid', () => {
     }> = [
       { row: { status: OrderStatus.PAID }, outcome: 'already-paid' },
       { row: { status: OrderStatus.CANCELLED }, outcome: 'cancelled' },
+      { row: { status: OrderStatus.EXPIRED }, outcome: 'expired' },
       { row: null, outcome: 'not-found' },
     ];
 

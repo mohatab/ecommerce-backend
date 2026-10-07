@@ -9,9 +9,9 @@ import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { OrderWithItems } from './dto/order-response.dto';
 import { ProductsService } from '../products/products.service';
 
-/** The four ways markPaid can end. It never throws, so this is the whole API. */
+/** The five ways markPaid can end. It never throws, so this is the whole API. */
 export type MarkPaidOutcome =
-  'paid' | 'already-paid' | 'cancelled' | 'not-found';
+  'paid' | 'already-paid' | 'cancelled' | 'expired' | 'not-found';
 
 @Injectable()
 export class OrdersService {
@@ -94,6 +94,15 @@ export class OrdersService {
           throw new ConflictException('Order is already paid');
         }
 
+        // Phase 5: the expiry sweep already released this order's stock, so a
+        // cancel here would restore it a second time. Distinct from the
+        // already-cancelled case below, which returns 200: the customer asked
+        // to cancel something that is no longer theirs to cancel, and a silent
+        // 200 would read as "we cancelled it for you".
+        if (existing.status === OrderStatus.EXPIRED) {
+          throw new ConflictException('Order has expired');
+        }
+
         // Already cancelled: idempotent, and stock is NOT restored again.
         return existing;
       }
@@ -163,7 +172,7 @@ export class OrdersService {
     }
 
     // An exhaustive switch, not a ternary with a fallthrough: every status
-    // this method recognises is named, so adding a fourth OrderStatus member
+    // this method recognises is named, so adding another OrderStatus member
     // makes the switch non-exhaustive and the function fail to compile
     // ("lacks ending return statement"). That forces a deliberate decision
     // for the new status instead of silently labelling it 'cancelled'.
@@ -172,6 +181,14 @@ export class OrdersService {
         return 'already-paid';
       case OrderStatus.CANCELLED:
         return 'cancelled';
+      // Phase 5. Reported distinctly, not folded into 'cancelled': a payment
+      // arriving for an order the expiry sweep already released is the one
+      // case where stock was restored and sold on while money moved, so the
+      // webhook's handler needs to tell it apart to log it as what it is. The
+      // transition itself is still refused — EXPIRED is terminal, and this
+      // method stays the only writer of PAID.
+      case OrderStatus.EXPIRED:
+        return 'expired';
       case OrderStatus.PENDING:
         // Unreachable in practice: PostgreSQL re-evaluates the CAS predicate
         // against the committed row, so a row this call failed to claim

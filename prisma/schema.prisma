@@ -39,6 +39,9 @@ model RefreshToken {
 
   @@index([familyId])
   @@index([userId])
+  // Phase 5: the purge selects expired tokens by expiresAt; without this the
+  // nightly sweep is a sequential scan of the whole table.
+  @@index([expiresAt])
   @@map("refresh_tokens")
 }
 
@@ -78,6 +81,7 @@ enum OrderStatus {
   PENDING
   CANCELLED
   PAID
+  EXPIRED
 }
 
 enum PaymentStatus {
@@ -120,13 +124,20 @@ model Order {
   currency       String
   idempotencyKey String      @map("idempotency_key")
   cancelledAt    DateTime?   @map("cancelled_at")
+  // Phase 5. Nullable: orders created before this phase have no deadline and
+  // are never swept.
+  expiresAt      DateTime?   @map("expires_at")
+  expiredAt      DateTime?   @map("expired_at")
   payment        Payment?
   items          OrderItem[]
+  findings       ReconciliationFinding[]
   createdAt      DateTime    @default(now()) @map("created_at")
   updatedAt      DateTime    @updatedAt @map("updated_at")
 
   @@unique([userId, idempotencyKey])
   @@index([userId, createdAt])
+  // The expiry sweep's selection predicate, exactly.
+  @@index([status, expiresAt])
   @@map("orders")
 }
 
@@ -167,5 +178,43 @@ model PaymentEvent {
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
+  // Phase 5: the retention purge selects by createdAt.
+  @@index([createdAt])
   @@map("payment_events")
+}
+
+/**
+ * Mutual exclusion for maintenance jobs, one row per job name for all time.
+ * The migration seeds every row at the epoch so acquire() is always an UPDATE
+ * and no code path needs an insert race. See spec section 9.3.
+ */
+model MaintenanceLease {
+  job         String   @id
+  holder      String
+  acquiredAt  DateTime @map("acquired_at")
+  heartbeatAt DateTime @map("heartbeat_at")
+  expiresAt   DateTime @map("expires_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("maintenance_leases")
+}
+
+model ReconciliationFinding {
+  id          String    @id @default(uuid(7))
+  orderId     String    @map("order_id")
+  order       Order     @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  paymentId   String?   @map("payment_id")
+  kind        String
+  detail      Json
+  occurrences Int       @default(1)
+  firstSeenAt DateTime  @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime  @default(now()) @map("last_seen_at")
+  resolvedAt  DateTime? @map("resolved_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@unique([orderId, kind])
+  @@index([kind, resolvedAt])
+  @@map("reconciliation_findings")
 }

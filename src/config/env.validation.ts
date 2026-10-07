@@ -60,4 +60,41 @@ export const envValidationSchema = Joi.object({
     otherwise: Joi.optional(),
   }),
   PAYMENT_WEBHOOK_SECRET: Joi.string().min(16).required(),
+  PAYMENT_PROVIDER_TIMEOUT_MS: Joi.number().integer().min(1000).default(10000),
+
+  // Phase 5 — scheduled maintenance. The three floors below are the point of
+  // this block: each one blocks a misconfiguration that destroys data or
+  // fabricates findings silently, rather than failing loudly at runtime.
+  MAINTENANCE_JOBS_ENABLED: Joi.boolean().default(true),
+  ORDER_EXPIRY_CRON: Joi.string().default('0 */5 * * * *'),
+  // Floor of 1: a TTL of 0 would stamp expiresAt = now() on every checkout and
+  // expire orders the instant they are created.
+  ORDER_EXPIRY_TTL_MINUTES: Joi.number().integer().min(1).default(30),
+  ORDER_EXPIRY_PAYMENT_STARTED_TTL_HOURS: Joi.number()
+    .integer()
+    .min(1)
+    .default(24),
+  ORDER_EXPIRY_BATCH_SIZE: Joi.number().integer().min(1).max(1000).default(100),
+  MAINTENANCE_PURGE_CRON: Joi.string().default('0 0 3 * * *'),
+  MAINTENANCE_PURGE_BATCH_SIZE: Joi.number()
+    .integer()
+    .min(1)
+    .max(10000)
+    .default(1000),
+  // Floor of 7 == JWT_REFRESH_TTL. Below it the purge would delete LIVE tokens.
+  REFRESH_TOKEN_RETENTION_DAYS: Joi.number().integer().min(7).default(30),
+  // Floor of 30: payment_events is the webhook idempotency ledger; deleting a
+  // row makes a pre-cutoff replay newly processable.
+  PAYMENT_EVENT_RETENTION_DAYS: Joi.number().integer().min(30).default(90),
+  RECONCILE_CRON: Joi.string().default('0 */15 * * * *'),
+  // Floor of 6 minutes: must exceed WEBHOOK_TOLERANCE_SECONDS (300s), or an
+  // in-flight payment is reported as divergent.
+  RECONCILE_MIN_AGE_MINUTES: Joi.number().integer().min(6).default(15),
+  RECONCILE_LOOKBACK_DAYS: Joi.number().integer().min(1).default(30),
+  RECONCILE_BATCH_SIZE: Joi.number().integer().min(1).max(1000).default(100),
+  RECONCILE_PRECHECK_FAILURE_THRESHOLD: Joi.number()
+    .integer()
+    .min(1)
+    .default(3),
+  MAINTENANCE_LEASE_SECONDS: Joi.number().integer().min(30).default(300),
 });

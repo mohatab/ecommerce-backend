@@ -13,6 +13,11 @@ export async function truncateAll(prisma: PrismaService): Promise<void> {
     FROM pg_tables
     WHERE schemaname = 'public'
       AND tablename <> '_prisma_migrations'
+      -- maintenance_leases is seeded by migration and holds no test data.
+      -- Truncating it would leave acquire() matching zero rows forever, so
+      -- every job would report skipped:'lease-held' and no e2e job would run.
+      -- Use resetLeases() to free a lease a test left held.
+      AND tablename <> 'maintenance_leases'
     ORDER BY tablename
   `;
 

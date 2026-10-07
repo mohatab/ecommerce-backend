@@ -19,6 +19,7 @@ interface ValidatedEnv {
   PAYMENT_PROVIDER: string;
   PAYMENT_API_KEY?: string;
   PAYMENT_WEBHOOK_SECRET: string;
+  MAINTENANCE_JOBS_ENABLED: boolean;
 }
 
 function validate(env: Record<string, unknown>): {
@@ -274,6 +275,84 @@ describe('envValidationSchema', () => {
       expect(
         validate(validEnv({ PAYMENT_WEBHOOK_SECRET: 'short' })).error?.message,
       ).toContain('PAYMENT_WEBHOOK_SECRET');
+    });
+
+    it('rejects a provider timeout below the 1000ms floor', () => {
+      expect(
+        rejectedKeys(
+          validate(validEnv({ PAYMENT_PROVIDER_TIMEOUT_MS: '100' })).error,
+        ),
+      ).toContain('PAYMENT_PROVIDER_TIMEOUT_MS');
+    });
+  });
+
+  describe('scheduled maintenance configuration', () => {
+    it('accepts an environment with no maintenance variables at all', () => {
+      expect(validate(validEnv()).error).toBeUndefined();
+    });
+
+    it('rejects an order expiry TTL of 0, which would expire orders at creation', () => {
+      const { error } = validate(validEnv({ ORDER_EXPIRY_TTL_MINUTES: '0' }));
+
+      expect(error?.message).toContain('ORDER_EXPIRY_TTL_MINUTES');
+    });
+
+    it('rejects a refresh-token retention below JWT_REFRESH_TTL, which would delete live tokens', () => {
+      const { error } = validate(
+        validEnv({ REFRESH_TOKEN_RETENTION_DAYS: '3' }),
+      );
+
+      expect(error?.message).toContain('REFRESH_TOKEN_RETENTION_DAYS');
+    });
+
+    it('rejects a payment-event retention that would make an old replay processable again', () => {
+      const { error } = validate(
+        validEnv({ PAYMENT_EVENT_RETENTION_DAYS: '10' }),
+      );
+
+      expect(error?.message).toContain('PAYMENT_EVENT_RETENTION_DAYS');
+    });
+
+    it('rejects a reconcile min-age below the webhook timestamp tolerance', () => {
+      // 300s tolerance == 5 minutes, so 5 is still inside the window an
+      // in-flight webhook may legitimately occupy; the floor is 6.
+      expect(
+        rejectedKeys(
+          validate(validEnv({ RECONCILE_MIN_AGE_MINUTES: '5' })).error,
+        ),
+      ).toContain('RECONCILE_MIN_AGE_MINUTES');
+    });
+
+    it('rejects a lease shorter than the 30-second floor', () => {
+      expect(
+        rejectedKeys(
+          validate(validEnv({ MAINTENANCE_LEASE_SECONDS: '5' })).error,
+        ),
+      ).toContain('MAINTENANCE_LEASE_SECONDS');
+    });
+
+    it('rejects batch sizes above their caps, which bound one tick of work', () => {
+      expect(
+        rejectedKeys(
+          validate(validEnv({ ORDER_EXPIRY_BATCH_SIZE: '5000' })).error,
+        ),
+      ).toContain('ORDER_EXPIRY_BATCH_SIZE');
+      expect(
+        rejectedKeys(
+          validate(validEnv({ MAINTENANCE_PURGE_BATCH_SIZE: '50000' })).error,
+        ),
+      ).toContain('MAINTENANCE_PURGE_BATCH_SIZE');
+      expect(
+        rejectedKeys(
+          validate(validEnv({ RECONCILE_BATCH_SIZE: '5000' })).error,
+        ),
+      ).toContain('RECONCILE_BATCH_SIZE');
+    });
+
+    it('defaults the jobs switch on, so omitting it does not disable maintenance', () => {
+      const { value } = validate(validEnv());
+
+      expect(value.MAINTENANCE_JOBS_ENABLED).toBe(true);
     });
   });
 });
