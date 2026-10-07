@@ -308,7 +308,12 @@ describe('StripePaymentProvider', () => {
     it('rejects when the provider does not know the payment', async () => {
       retrieve.mockRejectedValue(resourceMissing());
 
-      await expect(provider.retrievePayment('pi_gone')).rejects.toThrow();
+      await expect(provider.retrievePayment('pi_gone')).rejects.toThrow(
+        // Phase 5: the class, not a bare toThrow(). `rejects.toThrow()` with
+        // no argument passes for ANY rejection, so it proves nothing about
+        // §7.3's classification — and it is the shape the next reader copies.
+        ProviderPaymentNotFoundError,
+      );
     });
 
     /*
@@ -330,25 +335,38 @@ describe('StripePaymentProvider', () => {
       ).resolves.toMatchObject({ status: 'succeeded' });
     });
 
-    it("maps every other documented status to 'pending'", async () => {
-      // The full enum from the page cited above, minus 'succeeded'. Written
-      // out rather than sampled: a new member appearing in a future API
-      // version must not silently become a success.
+    it("maps every other status, listed or not, to 'pending'", async () => {
       const nonSuccess: Stripe.PaymentIntent.Status[] = [
+        // The full enum from the page cited above, minus 'succeeded'. Written
+        // out rather than sampled.
         'requires_payment_method',
         'requires_confirmation',
         'requires_action',
         'processing',
         'requires_capture',
         'canceled',
+        // THE FAIL-CLOSED PROPERTY, pinned deliberately rather than relied on
+        // as a side effect of some fixture omitting `status`. This value is in
+        // no Stripe enum; it stands in for a member a future API version adds.
+        // The SDK itself expects that — `PaymentIntent.Status` ends in
+        // `OtherString` (node_modules/stripe/cjs/shared.d.ts: "your
+        // integration should be prepared to handle enum variants that are
+        // listed in the API Documentation (but not the SDK)") — which is why
+        // the mapping must be an allowlist of the one success value and never
+        // a denylist of the known failures. A denylist maps this to
+        // 'succeeded', and 'succeeded' is what tells Task 4's sweep it may
+        // release an order's stock.
+        'requires_a_status_this_sdk_has_never_heard_of',
       ];
 
       for (const status of nonSuccess) {
         retrieve.mockResolvedValue(stripeIntent({ status }));
 
-        await expect(
-          provider.retrievePayment('pi_test_1'),
-        ).resolves.toMatchObject({ status: 'pending' });
+        const mapped = await provider.retrievePayment('pi_test_1');
+
+        // Paired with the input so a failure names the status that broke it;
+        // a bare toMatchObject would print only 'succeeded' vs 'pending'.
+        expect([status, mapped.status]).toEqual([status, 'pending']);
       }
     });
 
