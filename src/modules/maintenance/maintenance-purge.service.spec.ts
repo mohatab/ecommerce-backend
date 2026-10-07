@@ -130,6 +130,18 @@ describe('MaintenancePurgeService', () => {
       expect(String(warn.mock.calls[0][0])).toContain('payment_events');
     });
 
+    it('warns naming refresh_tokens when that batch comes back full', async () => {
+      // take is 7
+      prisma.refreshToken.findMany.mockResolvedValue(
+        Array.from({ length: 7 }, (_, i) => ({ id: `t${i}` })),
+      );
+
+      await service.run();
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain('refresh_tokens');
+    });
+
     it('does not warn when every batch is partial', async () => {
       await service.run();
 
