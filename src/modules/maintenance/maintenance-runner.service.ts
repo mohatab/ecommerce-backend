@@ -108,7 +108,19 @@ export class MaintenanceRunnerService {
       // job is unrunnable until the lease lapses. The error itself propagates
       // to the caller, which decides how loudly to report it (spec §9.5).
       clearInterval(timer);
-      await this.lease.release(job);
+
+      // Caught, never rethrown: a rejection thrown out of `finally` REPLACES
+      // whatever the job threw — including LeaseLostError — so an operator
+      // reading the logs would be told the release failed and never told why
+      // the tick did. The lease lapses on its own within
+      // MAINTENANCE_LEASE_SECONDS either way, so losing the release costs at
+      // most one skipped tick; losing the original error costs the diagnosis.
+      await this.lease.release(job).catch((error: unknown) => {
+        this.logger.error(
+          `Failed to release the lease for ${job}; it will lapse on its own`,
+          error instanceof Error ? error.stack : undefined,
+        );
+      });
     }
   }
 }

@@ -559,6 +559,28 @@ describe('OrdersService.expire', () => {
     );
   });
 
+  /**
+   * The structural half of "no provider call inside a transaction" for THIS
+   * service (spec §5.5, and Phase 4's absolute rule).
+   *
+   * Behavioural assertions cannot cover it here: the sweep's own spec records
+   * only its Phase 1 client while `orders.expire` is a mock, so a provider
+   * call added inside expire()'s $transaction would be invisible to every
+   * existing structural test. What CAN be pinned is the absence itself —
+   * `design:paramtypes` is emitted by `emitDecoratorMetadata` for the
+   * @Injectable() constructor, so injecting a provider (or any other
+   * I/O-capable dependency) changes this array and fails here. A token
+   * injected with @Inject() for an interface type lands as `Object`, so even
+   * PAYMENT_PROVIDER cannot slip in unseen.
+   */
+  it('injects nothing capable of I/O, so no provider is reachable from the transaction', () => {
+    expect(Reflect.getMetadata('design:paramtypes', OrdersService)).toEqual([
+      PrismaService,
+      ProductsService,
+      MaintenanceLeaseService,
+    ]);
+  });
+
   it('restores in ascending productId order, through the transaction client', async () => {
     await service.expire('order-1');
 

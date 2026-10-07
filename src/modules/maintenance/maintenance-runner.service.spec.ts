@@ -127,6 +127,25 @@ describe('MaintenanceRunnerService', () => {
     expect(lease.release).toHaveBeenCalledWith(MaintenanceJobName.ORDER_EXPIRY);
   });
 
+  it('lets the job error through when releasing the lease also fails', async () => {
+    // A rejection thrown out of `finally` would replace the job's error with
+    // a less informative one, at exactly the moment the truth matters most.
+    expiry.sweep.mockRejectedValue(new Error('sweep exploded'));
+    lease.release.mockRejectedValue(new Error('database gone'));
+
+    await expect(runner.run(MaintenanceJobName.ORDER_EXPIRY)).rejects.toThrow(
+      'sweep exploded',
+    );
+  });
+
+  it('still returns the summary when only releasing the lease fails', async () => {
+    lease.release.mockRejectedValue(new Error('database gone'));
+
+    await expect(
+      runner.run(MaintenanceJobName.ORDER_EXPIRY),
+    ).resolves.toMatchObject({ status: 'completed', ...COUNTS });
+  });
+
   it('heartbeats while the job runs and stops once it is done', async () => {
     jest.useFakeTimers();
 
