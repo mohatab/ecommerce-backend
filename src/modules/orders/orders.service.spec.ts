@@ -4,6 +4,8 @@ import { MarkPaidOutcome, OrdersService } from './orders.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { ProductsService } from '../products/products.service';
+import { MaintenanceJobName } from '../maintenance/maintenance-job-name.enum';
+import { MaintenanceLeaseService } from '../maintenance/maintenance-lease.service';
 
 type WhereArgs = [Record<string, unknown>];
 
@@ -47,6 +49,7 @@ describe('OrdersService', () => {
     service = new OrdersService(
       prisma as unknown as PrismaService,
       products as unknown as ProductsService,
+      {} as unknown as MaintenanceLeaseService,
     );
   });
 
@@ -164,6 +167,7 @@ describe('OrdersService.cancel', () => {
     service = new OrdersService(
       prisma as unknown as PrismaService,
       products as unknown as ProductsService,
+      {} as unknown as MaintenanceLeaseService,
     );
   });
 
@@ -326,6 +330,7 @@ describe('OrdersService.markPaid', () => {
     service = new OrdersService(
       basePrisma as unknown as PrismaService,
       {} as unknown as ProductsService,
+      {} as unknown as MaintenanceLeaseService,
     );
   });
 
@@ -437,5 +442,129 @@ describe('OrdersService.markPaid', () => {
     expect(tx.order.updateMany).toHaveBeenCalledTimes(1);
     expect(tx.order.findUnique).toHaveBeenCalledTimes(1);
     expectBasePrismaUntouched();
+  });
+});
+
+describe('OrdersService.expire', () => {
+  let service: OrdersService;
+  // Returned by the $transaction mock, so every "did it use tx?" assertion
+  // fails if expire() ever slips and reaches for this.prisma instead.
+  let txMock: {
+    order: {
+      updateMany: jest.Mock<Promise<{ count: number }>, UpdateManyArgs>;
+    };
+    orderItem: { findMany: jest.Mock<Promise<unknown[]>, [unknown]> };
+  };
+  let prisma: {
+    $transaction: jest.Mock<
+      Promise<unknown>,
+      [(tx: unknown) => Promise<unknown>]
+    >;
+  };
+  let products: {
+    incrementStock: jest.Mock<Promise<void>, [unknown, string, number]>;
+  };
+  let lease: {
+    assertHeld: jest.Mock<Promise<void>, [unknown, MaintenanceJobName]>;
+  };
+
+  beforeEach(() => {
+    txMock = {
+      order: {
+        updateMany: jest
+          .fn<Promise<{ count: number }>, UpdateManyArgs>()
+          .mockResolvedValue({ count: 1 }),
+      },
+      orderItem: {
+        findMany: jest.fn<Promise<unknown[]>, [unknown]>().mockResolvedValue([
+          { productId: 'p-a', quantity: 2 },
+          { productId: 'p-b', quantity: 3 },
+        ]),
+      },
+    };
+    prisma = {
+      $transaction: jest
+        .fn<Promise<unknown>, [(tx: unknown) => Promise<unknown>]>()
+        .mockImplementation((callback) => callback(txMock)),
+    };
+    products = {
+      incrementStock: jest
+        .fn<Promise<void>, [unknown, string, number]>()
+        .mockResolvedValue(undefined),
+    };
+    lease = {
+      assertHeld: jest
+        .fn<Promise<void>, [unknown, MaintenanceJobName]>()
+        .mockResolvedValue(undefined),
+    };
+
+    service = new OrdersService(
+      prisma as unknown as PrismaService,
+      products as unknown as ProductsService,
+      lease as unknown as MaintenanceLeaseService,
+    );
+  });
+
+  it('expires the order and restores every line in one transaction', async () => {
+    await expect(service.expire('order-1')).resolves.toBe('expired');
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(products.incrementStock).toHaveBeenCalledTimes(2);
+    expect(products.incrementStock).toHaveBeenNthCalledWith(
+      1,
+      txMock,
+      'p-a',
+      2,
+    );
+    expect(products.incrementStock).toHaveBeenNthCalledWith(
+      2,
+      txMock,
+      'p-b',
+      3,
+    );
+  });
+
+  it('claims the order with a PENDING predicate and stamps expiredAt', async () => {
+    await service.expire('order-1');
+
+    const [args] = txMock.order.updateMany.mock.calls[0];
+
+    // No userId predicate: no user owns this transition.
+    expect(args.where).toEqual({
+      id: 'order-1',
+      status: OrderStatus.PENDING,
+    });
+    expect(args.data).toMatchObject({ status: OrderStatus.EXPIRED });
+    expect(args.data.expiredAt).toBeInstanceOf(Date);
+  });
+
+  it('restores nothing when the CAS loses the race', async () => {
+    txMock.order.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(service.expire('order-1')).resolves.toBe('raced');
+    expect(products.incrementStock).not.toHaveBeenCalled();
+  });
+
+  it('fences on the lease, inside the transaction, before the CAS', async () => {
+    // Spec §4.5 effect 3. Fencing after the CAS would let an instance that
+    // lost the lease transition the order before noticing.
+    await service.expire('order-1');
+
+    expect(lease.assertHeld).toHaveBeenCalledWith(
+      txMock,
+      MaintenanceJobName.ORDER_EXPIRY,
+    );
+    expect(lease.assertHeld.mock.invocationCallOrder[0]).toBeLessThan(
+      txMock.order.updateMany.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('restores in ascending productId order, through the transaction client', async () => {
+    await service.expire('order-1');
+
+    expect(txMock.orderItem.findMany.mock.calls[0][0]).toMatchObject({
+      where: { orderId: 'order-1' },
+      orderBy: { productId: 'asc' },
+    });
   });
 });

@@ -5,6 +5,8 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { CheckoutService } from './checkout.service';
+import { ConfigService } from '@nestjs/config';
+import { AppConfig } from '../../config/configuration';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CartService } from '../cart/cart.service';
 import { ProductsService } from '../products/products.service';
@@ -104,6 +106,9 @@ describe('CheckoutService', () => {
       prisma as unknown as PrismaService,
       cart as unknown as CartService,
       products as unknown as ProductsService,
+      {
+        get: () => 30,
+      } as unknown as ConfigService<AppConfig, true>,
     );
   });
 
@@ -265,5 +270,26 @@ describe('CheckoutService', () => {
     ]);
     expect(txMock.order.create).toHaveBeenCalledTimes(1);
     expect(cart.clear).toHaveBeenCalledWith(txMock, 'cart-1');
+  });
+
+  it('stamps expiresAt at now + the configured tier-A TTL', async () => {
+    // Stored, not computed (spec §5.1): a later TTL change must not
+    // retroactively expire history, and the sweep's e2e tests backdate it.
+    const before = Date.now();
+
+    await service.checkout('user-1', 'key-abcdefgh');
+
+    const data = (
+      txMock.order.create.mock.calls[0][0] as {
+        data: { expiresAt: Date };
+      }
+    ).data;
+
+    expect(data.expiresAt.getTime()).toBeGreaterThanOrEqual(
+      before + 30 * 60_000,
+    );
+    expect(data.expiresAt.getTime()).toBeLessThanOrEqual(
+      Date.now() + 30 * 60_000,
+    );
   });
 });

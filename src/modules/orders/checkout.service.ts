@@ -4,7 +4,9 @@ import {
   Logger,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
+import { AppConfig } from '../../config/configuration';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CartService } from '../cart/cart.service';
 import { ProductsService } from '../products/products.service';
@@ -35,6 +37,7 @@ export class CheckoutService {
     private readonly prisma: PrismaService,
     private readonly cartService: CartService,
     private readonly productsService: ProductsService,
+    private readonly config: ConfigService<AppConfig, true>,
   ) {}
 
   /**
@@ -146,6 +149,17 @@ export class CheckoutService {
             idempotencyKey,
             totalCents,
             currency: [...currencies][0],
+            // Phase 5. STORED, not computed (spec §5.1): shortening the TTL
+            // later must not retroactively make a mass of old orders eligible
+            // for expiry, and a stored deadline is what lets a test backdate
+            // one order without a clock abstraction.
+            expiresAt: new Date(
+              Date.now() +
+                this.config.get('maintenance.orderExpiryTtlMinutes', {
+                  infer: true,
+                }) *
+                  60_000,
+            ),
             items: { create: lines },
           },
           include: { items: true },

@@ -11,3 +11,9 @@ if (!testDatabaseUrl) {
 }
 
 process.env.DATABASE_URL = testDatabaseUrl;
+
+// No background maintenance tick may race a test's assertions (spec §14.7).
+// Every suite drives jobs through MaintenanceRunnerService.run() directly, so
+// nothing here needs a registered cron. This is also why the master switch
+// exists at all.
+process.env.MAINTENANCE_JOBS_ENABLED = 'false';

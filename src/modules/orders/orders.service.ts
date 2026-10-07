@@ -8,6 +8,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { OrderWithItems } from './dto/order-response.dto';
 import { ProductsService } from '../products/products.service';
+import { MaintenanceJobName } from '../maintenance/maintenance-job-name.enum';
+import { MaintenanceLeaseService } from '../maintenance/maintenance-lease.service';
 
 /** The five ways markPaid can end. It never throws, so this is the whole API. */
 export type MarkPaidOutcome =
@@ -18,6 +20,9 @@ export class OrdersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly productsService: ProductsService,
+    // Phase 5. Injected for expire() alone, so the lease fencing runs inside
+    // the same transaction as the transition it protects (spec §4.5, §9.3.4).
+    private readonly lease: MaintenanceLeaseService,
   ) {}
 
   /** Always scoped to one user; there is no unscoped list route. */
@@ -124,6 +129,54 @@ export class OrdersService {
         where: { id: orderId },
         include: { items: true },
       });
+    });
+  }
+
+  /**
+   * The system-initiated terminal transition (Phase 5). Identical CAS shape to
+   * cancel(), minus the userId predicate because no user owns this action.
+   *
+   * The lease fencing, the CAS, the expiredAt stamp and EVERY incrementStock
+   * share ONE transaction (spec §4.5), and the fencing is the FIRST statement
+   * in it. A partial restoration must be impossible: an order whose transition
+   * committed with only some items restored would silently destroy inventory,
+   * and nothing would re-select it, because it is no longer PENDING.
+   *
+   * No provider call, and no other external I/O, may ever be added inside this
+   * transaction — the sweep vets candidates before it calls here (spec §5.5).
+   */
+  async expire(orderId: string): Promise<'expired' | 'raced'> {
+    return this.prisma.$transaction(async (tx) => {
+      await this.lease.assertHeld(tx, MaintenanceJobName.ORDER_EXPIRY);
+
+      const { count } = await tx.order.updateMany({
+        where: { id: orderId, status: OrderStatus.PENDING },
+        // expiresAt is never mutated here: it records the deadline, while
+        // expiredAt records the action taken on it.
+        data: { status: OrderStatus.EXPIRED, expiredAt: new Date() },
+      });
+
+      // Another transition won — the owner cancelled, or the webhook paid it.
+      // Restoring stock here would hand back units a different path already
+      // accounted for.
+      if (count === 0) {
+        return 'raced';
+      }
+
+      const items = await tx.orderItem.findMany({
+        where: { orderId },
+        orderBy: { productId: 'asc' },
+      });
+
+      for (const item of items) {
+        await this.productsService.incrementStock(
+          tx,
+          item.productId,
+          item.quantity,
+        );
+      }
+
+      return 'expired';
     });
   }
 
