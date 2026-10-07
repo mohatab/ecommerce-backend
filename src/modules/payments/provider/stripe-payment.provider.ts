@@ -8,6 +8,7 @@ import {
   PaymentProvider,
   ProviderEvent,
   ProviderPayment,
+  ProviderPaymentNotFoundError,
   amountLimitsFor,
 } from './payment-provider';
 
@@ -66,7 +67,14 @@ export class StripePaymentProvider implements PaymentProvider {
       );
     }
 
-    this.stripe = new Stripe(apiKey, { apiVersion: STRIPE_API_VERSION });
+    this.stripe = new Stripe(apiKey, {
+      apiVersion: STRIPE_API_VERSION,
+      // Phase 5. Previously absent, so a hung provider call could hang a
+      // maintenance sweep indefinitely (the SDK's own default is 80s). 10s
+      // matches the project's own TX_TIMEOUT_MS, its existing precedent for
+      // "longest a single operation may take".
+      timeout: configService.get('payments.timeoutMs', { infer: true }),
+    });
   }
 
   async createPayment(input: CreatePaymentInput): Promise<ProviderPayment> {
@@ -94,9 +102,37 @@ export class StripePaymentProvider implements PaymentProvider {
     // whole point of this member (spec §6.2, C3). An unknown id rejects,
     // because the port declares Promise<ProviderPayment> with no not-found
     // variant and FakePaymentProvider rejects too.
-    return toProviderPayment(
-      await this.stripe.paymentIntents.retrieve(providerPaymentId),
-    );
+    let intent: Stripe.PaymentIntent;
+
+    try {
+      intent = await this.stripe.paymentIntents.retrieve(providerPaymentId);
+    } catch (error) {
+      // Phase 5, spec §7.3. ONLY the documented resource-missing error becomes
+      // a not-found; a network failure, a timeout, a 5xx and a rate limit all
+      // rethrow unchanged, because "the provider does not have this payment"
+      // and "I could not ask the provider" are different facts and Task 6
+      // turns them into different findings.
+      //
+      // Read from Stripe's documentation, not inferred:
+      //   https://docs.stripe.com/error-codes — `resource_missing`: "The ID
+      //     provided isn't valid. Either the resource doesn't exist, or an ID
+      //     for a different resource has been provided."
+      //   https://docs.stripe.com/api/errors — HTTP 404 "The requested
+      //     resource doesn't exist", error type `invalid_request_error`.
+      // The CODE is checked, not just the class: StripeInvalidRequestError
+      // also carries parameter_unknown and friends, which are our bugs, not a
+      // missing payment.
+      if (
+        error instanceof Stripe.errors.StripeInvalidRequestError &&
+        error.code === 'resource_missing'
+      ) {
+        throw new ProviderPaymentNotFoundError(providerPaymentId);
+      }
+
+      throw error;
+    }
+
+    return toProviderPayment(intent);
   }
 
   verifyWebhook(rawBody: Buffer, signature: string): ProviderEvent {
@@ -176,5 +212,19 @@ function toProviderPayment(intent: Stripe.PaymentIntent): ProviderPayment {
     amountMinorUnits: intent.amount,
     // Uppercase on the way out too — the domain never sees lowercase (C8).
     currency: intent.currency.toUpperCase(),
+    // Phase 5. 'succeeded' is the provider's one documented success value:
+    // https://docs.stripe.com/api/payment_intents/object — "Status of this
+    // PaymentIntent, one of `requires_payment_method`, `requires_confirmation`,
+    // `requires_action`, `processing`, `requires_capture`, `canceled`, or
+    // `succeeded`", with "`succeeded` — The PaymentIntent has succeeded."
+    //
+    // Everything else — including any member a future API version adds — maps
+    // to 'pending', which is the fail-closed direction: 'pending' means "do
+    // not release this stock", so a wrong 'pending' only delays an expiry
+    // while a wrong 'succeeded' would release stock for a paid order.
+    //
+    // Shared with createPayment on purpose: a fresh intent is
+    // 'requires_payment_method', so it maps to 'pending' with no special case.
+    status: intent.status === 'succeeded' ? 'succeeded' : 'pending',
   };
 }

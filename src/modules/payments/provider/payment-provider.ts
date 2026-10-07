@@ -30,12 +30,39 @@ export interface CreatePaymentInput {
   idempotencyKey: string;
 }
 
+/**
+ * Phase 5. Deliberately binary: Phase 5 only ever asks "may I release this
+ * stock?", and requires-action / processing / canceled / failed all answer it
+ * identically. Modelling the provider's full vocabulary would be inventing
+ * provider behaviour to no benefit, and SUPPORTED_EVENT_TYPE is already only
+ * 'payment_intent.succeeded'.
+ */
+export type ProviderPaymentStatus = 'succeeded' | 'pending';
+
+/**
+ * Not-found is an ERROR, not a third status (spec §7.3). Keeping it off
+ * ProviderPaymentStatus preserves the binary meaning above and avoids a third
+ * member every consumer would handle identically to 'pending'.
+ *
+ * Every OTHER failure — network, timeout, 5xx, rate limit — stays a plain
+ * rejection: "the provider does not have this payment" and "I could not ask
+ * the provider" are different facts, and only the first is evidence.
+ */
+export class ProviderPaymentNotFoundError extends Error {
+  constructor(providerPaymentId: string) {
+    super(`Provider does not recognise payment ${providerPaymentId}`);
+    this.name = 'ProviderPaymentNotFoundError';
+  }
+}
+
 export interface ProviderPayment {
   providerPaymentId: string;
   clientSecret: string;
   amountMinorUnits: number;
   /** Uppercase ISO-4217. Adapters normalise; the domain never sees lowercase. */
   currency: string;
+  /** Phase 5. Provider-reported status at read time. */
+  status: ProviderPaymentStatus;
 }
 
 export interface ProviderEvent {

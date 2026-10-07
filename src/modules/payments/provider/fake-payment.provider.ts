@@ -8,6 +8,7 @@ import {
   PaymentProvider,
   ProviderEvent,
   ProviderPayment,
+  ProviderPaymentNotFoundError,
   amountLimitsFor,
 } from './payment-provider';
 
@@ -70,6 +71,12 @@ export class FakePaymentProvider implements PaymentProvider {
   private nextCreateFailure: Error | null = null;
   private nextCreateAmount: number | null = null;
 
+  /** providerPaymentIds that retrievePayment reports as 'succeeded'. */
+  private readonly succeededIds = new Set<string>();
+
+  private failRetrieve = false;
+  private notFoundRetrieve = false;
+
   constructor(configService: ConfigService<AppConfig, true>) {
     this.webhookSecret = configService.get('payments.webhookSecret', {
       infer: true,
@@ -129,6 +136,9 @@ export class FakePaymentProvider implements PaymentProvider {
       // normalise" — so the fake normalises, rather than relying on every
       // caller already passing uppercase (C8, inbound side of the same rule).
       currency: input.currency.toUpperCase(),
+      // A freshly created intent has not succeeded. A statement about our own
+      // call, not a claim about the provider (spec §7.4).
+      status: 'pending',
     };
 
     this.intents.set(providerPaymentId, payment);
@@ -142,16 +152,43 @@ export class FakePaymentProvider implements PaymentProvider {
   }
 
   retrievePayment(providerPaymentId: string): Promise<ProviderPayment> {
+    // Armed before the lookup, and one-shot, exactly like nextCreateFailure:
+    // "the provider is unreachable" is independent of whether this id exists.
+    if (this.failRetrieve) {
+      this.failRetrieve = false;
+
+      return Promise.reject(new Error('Provider unreachable'));
+    }
+
+    // A KNOWN id the provider claims not to recognise — the §7.3 case that an
+    // unminted id cannot stand in for, because a local Payment row exists.
+    if (this.notFoundRetrieve) {
+      this.notFoundRetrieve = false;
+
+      return Promise.reject(
+        new ProviderPaymentNotFoundError(providerPaymentId),
+      );
+    }
+
     const payment = this.intents.get(providerPaymentId);
 
     if (payment === undefined) {
-      return Promise.reject(new Error(`Unknown payment ${providerPaymentId}`));
+      // Not a generic Error: not-found is a DISTINGUISHABLE rejection (spec
+      // §7.3), and this is the window that makes Phase 4's 502 path exist.
+      return Promise.reject(
+        new ProviderPaymentNotFoundError(providerPaymentId),
+      );
     }
 
     // A copy: ProviderPayment has no readonly members, so handing back the
     // stored object would let a caller mutate the fake's state and corrupt
     // every later retrieval of the same intent.
-    return Promise.resolve({ ...payment });
+    return Promise.resolve({
+      ...payment,
+      status: this.succeededIds.has(providerPaymentId)
+        ? 'succeeded'
+        : payment.status,
+    });
   }
 
   verifyWebhook(rawBody: Buffer, signature: string): ProviderEvent {
@@ -274,6 +311,31 @@ export class FakePaymentProvider implements PaymentProvider {
     this.nextCreateAmount = amountMinorUnits;
   }
 
+  /** The next retrievePayment rejects. A timeout is the same to the caller. */
+  failNextRetrieve(): void {
+    this.failRetrieve = true;
+  }
+
+  /**
+   * The next retrievePayment rejects with ProviderPaymentNotFoundError even
+   * for an id this provider minted — the "provider lost it" case, which is a
+   * different finding from an unreachable provider (spec §7.3).
+   */
+  notFoundNextRetrieve(): void {
+    this.notFoundRetrieve = true;
+  }
+
+  /**
+   * Marks an intent succeeded for subsequent retrievals.
+   *
+   * NOT one-shot, unlike the two above: "this payment succeeded" is a
+   * persistent fact about the intent, and a sweep that retrieves it twice must
+   * get the same answer both times.
+   */
+  markNextRetrieveSucceeded(providerPaymentId: string): void {
+    this.succeededIds.add(providerPaymentId);
+  }
+
   reset(): void {
     this.intents.clear();
     this.retention.clear();
@@ -281,6 +343,9 @@ export class FakePaymentProvider implements PaymentProvider {
     this.sequence = 0;
     this.nextCreateFailure = null;
     this.nextCreateAmount = null;
+    this.succeededIds.clear();
+    this.failRetrieve = false;
+    this.notFoundRetrieve = false;
   }
 
   /** HMAC over `<timestamp>.<raw bytes>` — binds both, like Stripe's v1. */

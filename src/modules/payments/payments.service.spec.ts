@@ -25,6 +25,11 @@ const CREATED: ProviderPayment = {
   clientSecret: 'pi_1_secret',
   amountMinorUnits: 1000,
   currency: 'USD',
+  // Phase 5. Initiation neither reads nor asserts this — PaymentsService
+  // branches on the local Payment row, never on a provider status — but the
+  // port now requires it, and a fixture that lied about the shape would be
+  // the one place a missing field could hide.
+  status: 'pending',
 };
 
 describe('PaymentsService.initiate', () => {
