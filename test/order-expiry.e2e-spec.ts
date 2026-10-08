@@ -294,6 +294,46 @@ describe('Order expiry sweep (e2e)', () => {
         failed: 0,
       });
       await expectUntouched();
+
+      // Spec §5.5 step 2: the veto records the finding at decision time, so
+      // "why did this order not expire?" is answerable from the findings
+      // table rather than only from the log.
+      const rows = await prisma.reconciliationFinding.findMany();
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        orderId,
+        kind: 'PROVIDER_SUCCESS_LOCAL_NOT_PAID',
+        occurrences: 1,
+        resolvedAt: null,
+      });
+      expect(rows[0].detail).toMatchObject({ providerPaymentId });
+    });
+
+    it('advances one row, never two, when the veto repeats on a later tick', async () => {
+      // The sweep and reconciliation are both producers of this kind, and a
+      // sweep alone re-observes it every tick. The writer's upsert on
+      // (orderId, kind) is what keeps that one row.
+      const providerPaymentId = await withPayment(48);
+
+      provider.markNextRetrieveSucceeded(providerPaymentId);
+      await runner.run(MaintenanceJobName.ORDER_EXPIRY);
+      await runner.run(MaintenanceJobName.ORDER_EXPIRY);
+
+      const rows = await prisma.reconciliationFinding.findMany();
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].occurrences).toBe(2);
+    });
+
+    it('records no finding when the provider read fails', async () => {
+      await withPayment(48);
+      provider.failNextRetrieve();
+
+      await runner.run(MaintenanceJobName.ORDER_EXPIRY);
+
+      // An unreachable provider is not evidence that a payment succeeded.
+      expect(await prisma.reconciliationFinding.findMany()).toHaveLength(0);
     });
 
     it('does not expire an order when the provider read fails', async () => {

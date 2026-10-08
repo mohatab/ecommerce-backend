@@ -13,6 +13,7 @@ import {
 import type { PaymentProvider } from '../payments/provider/payment-provider';
 import { JobCounts } from './job-counts';
 import { LeaseLostError } from './maintenance-lease.service';
+import { ReconciliationFindingWriter } from './reconciliation-finding.writer';
 
 const HOUR_MS = 3_600_000;
 
@@ -46,6 +47,7 @@ export class OrderExpiryService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService<AppConfig, true>,
     private readonly orders: OrdersService,
+    private readonly findings: ReconciliationFindingWriter,
     @Inject(PAYMENT_PROVIDER) private readonly provider: PaymentProvider,
   ) {}
 
@@ -79,7 +81,10 @@ export class OrderExpiryService {
       }),
       select: {
         id: true,
-        payment: { select: { providerPaymentId: true, createdAt: true } },
+        payment: {
+          // `id` is selected for ReconciliationFinding.paymentId below.
+          select: { id: true, providerPaymentId: true, createdAt: true },
+        },
       },
     });
 
@@ -111,27 +116,16 @@ export class OrderExpiryService {
         continue;
       }
 
+      // The try wraps ONLY the provider call. The finding write below used to
+      // sit inside it, which would have reported a Prisma failure with the
+      // catch's "could not read payment status from the provider" message —
+      // the wrong diagnosis for the wrong subsystem.
+      let providerPayment;
+
       try {
-        const providerPayment = await this.provider.retrievePayment(
+        providerPayment = await this.provider.retrievePayment(
           payment.providerPaymentId,
         );
-
-        if (providerPayment.status === 'succeeded') {
-          // D3: the read is a VETO, never an authority. The order is left
-          // PENDING and is NOT marked PAID — only the signature-verified
-          // webhook writes PAID. Task 6 files the matching
-          // PROVIDER_SUCCESS_LOCAL_NOT_PAID finding; until then this log is
-          // the signal.
-          this.logger.error(
-            `Order ${candidate.id}: provider reports payment ` +
-              `${payment.providerPaymentId} succeeded while the order is ` +
-              `still PENDING; not expiring`,
-          );
-          counts.skipped += 1;
-          continue;
-        }
-
-        vetted.push(candidate.id);
       } catch (error) {
         if (error instanceof ProviderPaymentNotFoundError) {
           // "The provider does not have this payment" is evidence, but it is
@@ -154,7 +148,43 @@ export class OrderExpiryService {
           error instanceof Error ? error.stack : undefined,
         );
         counts.failed += 1;
+        continue;
       }
+
+      if (providerPayment.status === 'succeeded') {
+        // D3: the read is a VETO, never an authority. The order is left
+        // PENDING and is NOT marked PAID — only the signature-verified
+        // webhook writes PAID.
+        //
+        // The finding is recorded HERE, at veto time (spec §5.5 step 2),
+        // rather than left to reconciliation to re-derive: an operator asking
+        // "why did this order not expire?" should find a row, and this is the
+        // only place that holds the answer at the moment the decision is made.
+        // Reconciliation's candidate set 1 detects the same condition, and the
+        // writer's upsert on (orderId, kind) is exactly why two producers are
+        // safe — the second observation advances the counters of the first
+        // row instead of colliding.
+        await this.findings.record(
+          candidate.id,
+          payment.id,
+          'PROVIDER_SUCCESS_LOCAL_NOT_PAID',
+          {
+            providerPaymentId: payment.providerPaymentId,
+            providerAmountMinorUnits: providerPayment.amountMinorUnits,
+            providerCurrency: providerPayment.currency,
+            observedAt: new Date().toISOString(),
+          },
+        );
+        this.logger.error(
+          `Order ${candidate.id}: provider reports payment ` +
+            `${payment.providerPaymentId} succeeded while the order is ` +
+            `still PENDING; not expiring`,
+        );
+        counts.skipped += 1;
+        continue;
+      }
+
+      vetted.push(candidate.id);
     }
 
     // ---- Phase 2: commit, one transaction per order (spec §4.5). ----

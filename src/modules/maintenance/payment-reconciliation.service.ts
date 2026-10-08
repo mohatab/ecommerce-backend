@@ -249,6 +249,12 @@ export class PaymentReconciliationService {
       // Set 3's payments, by the orders its findings name.
       this.prisma.payment.findMany({
         where: { orderId: { in: open.map((finding) => finding.orderId) } },
+        // Bounded like the other two sets, so §8.2's "bounded per tick" is
+        // true of the UNION and not merely of each half. Without it the tick
+        // was bounded only indirectly, by open findings times payments per
+        // order. `orderBy` because a `take` without one is arbitrary.
+        orderBy: { createdAt: 'asc' },
+        take: batchSize,
         select,
       }),
     ]);
@@ -312,9 +318,19 @@ export class PaymentReconciliationService {
       return { detected, determined, read: 'none' };
     }
 
-    // From here on a provider read is attempted, so PROVIDER_UNREACHABLE is
-    // decided one way or the other.
-    determined.add('PROVIDER_UNREACHABLE');
+    // From here on a provider read is attempted. PROVIDER_UNREACHABLE is
+    // deliberately NOT marked determined yet: only a read that ANSWERS proves
+    // reachability, and the answer arrives in the two arms below.
+    //
+    // Marking it here was a real bug, and it was the fail-closed rule applied
+    // to raising a finding but not to clearing one. A failed read below
+    // threshold detects nothing, so a determined-and-not-detected
+    // PROVIDER_UNREACHABLE was RESOLVED by the very read that proves the
+    // provider is still unreachable — which happens after a restart or when
+    // pruneFailureCounters() drops the id. The alertable number of spec §13,
+    // COUNT(*) WHERE resolved_at IS NULL, then went all-clear mid-outage for
+    // up to `threshold` ticks. A failed read is the evidence the finding
+    // should STAY OPEN.
 
     try {
       const providerPayment = await this.provider.retrievePayment(
@@ -322,6 +338,9 @@ export class PaymentReconciliationService {
       );
 
       this.consecutiveFailures.delete(candidate.providerPaymentId);
+      // The provider answered, so it is reachable: this is the only thing
+      // that may clear an open PROVIDER_UNREACHABLE.
+      determined.add('PROVIDER_UNREACHABLE');
       determined.add('PROVIDER_SUCCESS_LOCAL_NOT_PAID');
       determined.add('PROVIDER_PAYMENT_NOT_FOUND');
       determined.add('AMOUNT_MISMATCH');
@@ -365,8 +384,10 @@ export class PaymentReconciliationService {
       return { detected, determined, read: 'ok' };
     } catch (error) {
       if (error instanceof ProviderPaymentNotFoundError) {
-        // A definite answer, so the counter clears: the provider WAS reached.
+        // A definite answer, so the counter clears: the provider WAS reached,
+        // which also clears an open PROVIDER_UNREACHABLE.
         this.consecutiveFailures.delete(candidate.providerPaymentId);
+        determined.add('PROVIDER_UNREACHABLE');
         determined.add('PROVIDER_PAYMENT_NOT_FOUND');
         detected.set('PROVIDER_PAYMENT_NOT_FOUND', {
           providerPaymentId: candidate.providerPaymentId,

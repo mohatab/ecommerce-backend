@@ -381,6 +381,52 @@ describe('Payment reconciliation (e2e)', () => {
       expect(summary.affected).toBe(1);
     });
 
+    /**
+     * The §13 alert must not go all-clear mid-outage.
+     *
+     * The finding is seeded through the writer rather than by driving three
+     * ticks and then reaching into the service, because that IS the shape
+     * being tested: a finding a previous process raised, in front of a process
+     * whose in-memory counter knows nothing about it. The same thing happens
+     * without a restart whenever pruneFailureCounters() drops the id. No
+     * test-only method on the service was added to reach it.
+     */
+    it('keeps an already-open PROVIDER_UNREACHABLE open when a read fails below threshold', async () => {
+      const created = await order();
+
+      await agedPayment(created.id);
+      await writer.record(created.id, null, 'PROVIDER_UNREACHABLE', {
+        consecutiveFailures: 3,
+      });
+
+      provider.failNextRetrieve();
+      await reconcile();
+
+      const row = await only();
+
+      expect(row.kind).toBe('PROVIDER_UNREACHABLE');
+      // A failed read is the evidence this should stay open, never the
+      // evidence that clears it.
+      expect(row.resolvedAt).toBeNull();
+    });
+
+    it('resolves PROVIDER_UNREACHABLE once the provider answers again', async () => {
+      const created = await order();
+
+      await agedPayment(created.id);
+
+      for (let tick = 0; tick < 3; tick += 1) {
+        provider.failNextRetrieve();
+        await reconcile();
+      }
+
+      expect((await only()).resolvedAt).toBeNull();
+
+      await reconcile();
+
+      expect((await only()).resolvedAt).not.toBeNull();
+    });
+
     it('leaves an open finding alone while the provider is unreachable', async () => {
       const created = await order();
 

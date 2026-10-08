@@ -10,12 +10,16 @@ import {
 } from '../payments/provider/payment-provider';
 import { LeaseLostError } from './maintenance-lease.service';
 import { OrderExpiryService } from './order-expiry.service';
+import {
+  ReconciliationFindingKind,
+  ReconciliationFindingWriter,
+} from './reconciliation-finding.writer';
 
 const HOUR_MS = 3_600_000;
 
 interface Candidate {
   id: string;
-  payment: { providerPaymentId: string; createdAt: Date } | null;
+  payment: { id: string; providerPaymentId: string; createdAt: Date } | null;
 }
 
 function tierA(id: string): Candidate {
@@ -27,6 +31,8 @@ function tierB(id: string, ageHours = 48): Candidate {
   return {
     id,
     payment: {
+      // Selected for ReconciliationFinding.paymentId on the succeeded veto.
+      id: `payment-${id}`,
       providerPaymentId: `pi_${id}`,
       createdAt: new Date(Date.now() - ageHours * HOUR_MS),
     },
@@ -55,6 +61,12 @@ describe('OrderExpiryService', () => {
   let provider: {
     retrievePayment: jest.Mock<Promise<ProviderPayment>, [string]>;
   };
+  let findings: {
+    record: jest.Mock<
+      Promise<void>,
+      [string, string | null, ReconciliationFindingKind, unknown]
+    >;
+  };
 
   beforeEach(() => {
     prisma = {
@@ -79,6 +91,14 @@ describe('OrderExpiryService', () => {
         .fn<Promise<ProviderPayment>, [string]>()
         .mockImplementation(() => providerPayment('pending')),
     };
+    findings = {
+      record: jest
+        .fn<
+          Promise<void>,
+          [string, string | null, ReconciliationFindingKind, unknown]
+        >()
+        .mockResolvedValue(undefined),
+    };
 
     const config = {
       get: (key: string): number =>
@@ -89,6 +109,7 @@ describe('OrderExpiryService', () => {
       prisma as unknown as PrismaService,
       config,
       orders as unknown as OrdersService,
+      findings as unknown as ReconciliationFindingWriter,
       provider as unknown as PaymentProvider,
     );
   });
@@ -164,6 +185,31 @@ describe('OrderExpiryService', () => {
       failed: 0,
     });
     expect(orders.expire).not.toHaveBeenCalled();
+    // Spec §5.5 step 2: the veto RECORDS the finding, so an operator asking
+    // "why did this not expire?" finds a row and not only a log line. The
+    // writer upserts on (orderId, kind), which is what makes the sweep and
+    // reconciliation safe as two producers of the same finding.
+    expect(findings.record).toHaveBeenCalledTimes(1);
+
+    const [orderId, paymentId, kind, detail] = findings.record.mock.calls[0];
+
+    expect(orderId).toBe('order-1');
+    expect(paymentId).toBe('payment-order-1');
+    expect(kind).toBe('PROVIDER_SUCCESS_LOCAL_NOT_PAID');
+    expect(Object.keys(detail as object).sort()).toEqual([
+      'observedAt',
+      'providerAmountMinorUnits',
+      'providerCurrency',
+      'providerPaymentId',
+    ]);
+  });
+
+  it('records no finding for a tier-B candidate the provider reports pending', async () => {
+    prisma.order.findMany.mockResolvedValue([tierB('order-1')]);
+
+    await service.sweep();
+
+    expect(findings.record).not.toHaveBeenCalled();
   });
 
   it('does not expire a tier-B candidate the provider does not recognise', async () => {

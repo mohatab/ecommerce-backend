@@ -322,6 +322,44 @@ describe('PaymentReconciliationService', () => {
       expect(resolve).not.toHaveBeenCalledWith('ord1', 'AMOUNT_MISMATCH');
     });
 
+    /**
+     * The alertable number of spec §13 is COUNT(*) WHERE resolved_at IS NULL.
+     * A failed read must never decrement it: only a read that ANSWERS proves
+     * reachability. This fires after a restart, and whenever
+     * pruneFailureCounters() has dropped the id, because the counter then
+     * restarts below threshold while the outage continues.
+     */
+    it('does NOT resolve PROVIDER_UNREACHABLE on a failed read below threshold', async () => {
+      open.mockResolvedValue([openFinding('ord1', 'PROVIDER_UNREACHABLE')]);
+      given({ unresolved: [payment()], forOpen: [payment()] });
+      retrievePayment.mockRejectedValue(new Error('socket hang up'));
+
+      await service.run();
+
+      expect(resolve).not.toHaveBeenCalled();
+    });
+
+    it('resolves PROVIDER_UNREACHABLE only once the provider answers', async () => {
+      open.mockResolvedValue([openFinding('ord1', 'PROVIDER_UNREACHABLE')]);
+      given({ unresolved: [payment()], forOpen: [payment()] });
+
+      await service.run();
+
+      expect(resolve).toHaveBeenCalledWith('ord1', 'PROVIDER_UNREACHABLE');
+    });
+
+    it('resolves PROVIDER_UNREACHABLE on a not-found, which also proves reachability', async () => {
+      open.mockResolvedValue([openFinding('ord1', 'PROVIDER_UNREACHABLE')]);
+      given({ unresolved: [payment()], forOpen: [payment()] });
+      retrievePayment.mockRejectedValue(
+        new ProviderPaymentNotFoundError('pi_1'),
+      );
+
+      await service.run();
+
+      expect(resolve).toHaveBeenCalledWith('ord1', 'PROVIDER_UNREACHABLE');
+    });
+
     it('resolves a refund-owed finding once the order leaves a terminal state', async () => {
       open.mockResolvedValue([
         openFinding('ord1', 'PAID_ORDER_TERMINAL_UNPAYABLE'),
