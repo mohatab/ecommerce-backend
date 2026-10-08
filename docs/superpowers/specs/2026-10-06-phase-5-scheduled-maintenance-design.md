@@ -1104,8 +1104,8 @@ and the failing output must be recorded.
 
 | Control | Naive implementation | Must fail with |
 |---------|---------------------|----------------|
-| C-E1 | `expire()` as read → check `status` → update | stock restored **twice** on expiry-vs-cancel |
-| C-E2 | remove the lease acquire **and** the fencing re-assertion | two instances both restore (§9.3.6 test 4) |
+| C-E1 | `expire()` as read → check `status` → update | stock restored **twice** on expiry-vs-cancel — **but only under a forced interleaving; see the amendment below** |
+| C-E2 | remove the lease acquire **and** the fencing re-assertion | both instances report `completed`, failing the **exclusion** assertion (§9.3.6 test 4). **Not** "both restore" — see the amendment below |
 | C-E3 | restoration loop outside the transition's transaction | a **partial** restoration persists after an induced mid-loop failure |
 | C-E4 | pre-check moved inside the transaction | external I/O inside a transaction (also violates §5.5) |
 | C-E5 | fail-open on provider error | a succeeded payment's order expired and its stock restored |
@@ -1117,6 +1117,38 @@ If a control does **not** reproduce its failure, the result is recorded as a
 **null result** and the property is reported as unproven — as Phase 3 did for C3
 and Phase 4 did for its sequential P1 control. A green run is never upgraded to
 proof by assertion.
+
+#### Amendments recorded after running the controls
+
+Two rows above predicted the wrong failure, and the corrections stand as part of
+the spec rather than as errata buried in a task report.
+
+**C-E2 — "two instances both restore" is a provable null result.** It contradicts
+**§9.3.4**, which is the correct section: *the per-order CAS is independently
+sufficient against double restoration.* Running the control confirmed §9.3.4 and
+refuted this row. With the acquire and the fence removed, both instances report
+`completed` — exclusion is gone — while one reports `affected: 1` and the other
+`skipped: 1`, and the order ends `EXPIRED` with its stock restored **exactly
+once**, because `updateMany({ where: { id, status: PENDING } })` matched for only
+one of them. So the control discriminates on the property the lease actually
+owns, which is duplicate *work*, not duplicate *effect*. The division of labour
+that §9.3.4 states — **the lease prevents wasted duplicate work; the fencing
+check and the CAS prevent incorrect work** — is the rule; anyone hunting a double
+restoration here is hunting a bug that cannot occur while the CAS stands.
+
+**C-E1 — reproduces only under a forced interleaving, and is therefore
+qualified.** The naive read → check → update shape did **not** reproduce on its
+own: in this harness the cancel commits before the sweep reaches that order's
+read, so the naive read sees `CANCELLED` and refuses by itself. Widening the gap
+between the naive read and its update did not help either, because the window
+sits on the wrong side of the cancel's commit. The double restoration appears
+only once the interleaving is forced — a delay inside `cancel()`'s transaction,
+after its CAS, so the cancel holds the order's row lock while the naive
+`findUnique` reads it as still `PENDING`. Under that interleaving the naive shape
+restores twice and the shipped CAS restores once, which is a genuine
+discrimination. Read it as **strong evidence that the CAS is what prevents the
+double restoration, and weak evidence that the shipped suite would catch the
+regression unaided** — the Phase 3 C3 situation, recorded the same way.
 
 ### 14.5 Failure injection
 
