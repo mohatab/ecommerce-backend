@@ -852,7 +852,9 @@ For the admin trigger, the same failure surfaces as **409** (§10.1).
    transaction **rolls back** (`LeaseLostError`) and the order remains `PENDING`
    with stock unrestored, so no half-applied state exists.
 4. **Negative control C-E2 (§14.4):** remove the fencing re-assertion and the
-   lease acquire, then run test 2. It must fail by restoring stock **twice**.
+   lease acquire, then run test 2. It must fail because **both instances report
+   `completed`** — the exclusion assertion. Stock is still restored exactly
+   once, by the CAS of §9.3.4; §14.4's amendment records why.
 
 ### 9.4 No queue, no retries, no dead-letter queue
 
