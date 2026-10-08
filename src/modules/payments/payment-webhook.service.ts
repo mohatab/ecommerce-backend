@@ -91,15 +91,73 @@ export class PaymentWebhookService {
         // 4. The ONLY writer of PAID, and it lives in OrdersModule (D9).
         const outcome = await this.ordersService.markPaid(tx, order.id);
 
-        if (outcome === 'cancelled') {
-          // The reconciliation state: money was taken for an order that was
-          // already cancelled and whose stock has been restored. Phase 4 does
-          // NOT refund it (docs/deferred-limitations.md, spec §17.1). Recorded
-          // loudly and acknowledged, so the provider stops retrying.
-          this.logger.error(
-            `Payment succeeded for CANCELLED order ${order.id} ` +
-              `(event ${event.providerEventId}); manual refund required`,
-          );
+        // Every outcome is named, in the same spirit as markPaid's switch:
+        // a chain of `if`s let Phase 5's 'expired' fall through silently,
+        // producing no log and no observable behaviour at all. The two
+        // success arms are explicitly silent — an error log on them would
+        // make the error level useless for the two arms that need it.
+        switch (outcome) {
+          // The success paths, DELIBERATELY SILENT — handled, not forgotten.
+          // An error log here would make the level useless for the two arms
+          // below, which are the ones an operator has to act on.
+          case 'paid':
+          case 'already-paid':
+            break;
+          case 'cancelled':
+            // The reconciliation state: money was taken for an order that was
+            // already cancelled and whose stock has been restored. Phase 4
+            // does NOT refund it (docs/deferred-limitations.md, spec §17.1).
+            // Recorded loudly and acknowledged, so the provider stops
+            // retrying.
+            this.logger.error(
+              `Payment succeeded for CANCELLED order ${order.id} ` +
+                `(event ${event.providerEventId}); manual refund required`,
+            );
+            break;
+          // Phase 5, spec §4.3. Same shape as 'cancelled' — log loudly,
+          // mutate nothing, return 200 — but its own message, because the
+          // operator response differs: a lapse is a system-initiated release
+          // of inventory that has since been resold, a cancel was a customer
+          // action.
+          case 'expired':
+            this.logger.error(
+              `Payment succeeded for order ${order.id} after it expired ` +
+                `(event ${event.providerEventId}); stock was already restored ` +
+                `and manual refund is required`,
+            );
+            break;
+          case 'not-found':
+            // Unreachable: the order was read above in this same tx. Named
+            // rather than defaulted, so the next outcome is a decision.
+            this.logger.error(
+              `Order ${order.id} vanished between the read and the CAS ` +
+                `(event ${event.providerEventId})`,
+            );
+            break;
+          /**
+           * A COMPILE-TIME TRIPWIRE, NOT A SILENT CATCH-ALL. Do not "clean
+           * this up" — it is the exact opposite of the fallback `default`
+           * that spec §4.3 forbids in markPaid, and deleting it reintroduces
+           * the bug this switch was written to fix.
+           *
+           * The `never` assignment fails the build if a sixth
+           * MarkPaidOutcome is added, which markPaid's own switch does NOT
+           * catch: that one is exhaustive over OrderStatus, so an outcome
+           * added for a non-status reason widens this union with no error
+           * anywhere and would fall through here unhandled.
+           *
+           * It LOGS and does not throw. A future slip must not 500 the
+           * webhook — that is what makes the provider retry forever.
+           */
+          default: {
+            const _exhaustive: never = outcome;
+
+            this.logger.error(
+              `Unhandled markPaid outcome ${String(_exhaustive)} for order ` +
+                `${order.id} (event ${event.providerEventId})`,
+            );
+            break;
+          }
         }
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },

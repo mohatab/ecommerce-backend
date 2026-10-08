@@ -11,6 +11,7 @@ import {
   AMOUNT_LIMITS,
   AmountLimits,
   PaymentProvider,
+  ProviderPaymentNotFoundError,
   SUPPORTED_EVENT_TYPE,
 } from './payment-provider';
 import { WEBHOOK_TOLERANCE_SECONDS } from './fake-payment.provider';
@@ -18,12 +19,19 @@ import { WEBHOOK_TOLERANCE_SECONDS } from './fake-payment.provider';
 const SECRET = 'whsec_test_secret';
 const API_KEY = 'sk_test_key';
 
+/**
+ * Deliberately NOT the config default (10000): a test that asserts the default
+ * value cannot tell "read from config" from "hardcoded in the adapter".
+ */
+const TIMEOUT_MS = 7000;
+
 function configStub(
   overrides: Record<string, unknown> = {},
 ): ConfigService<AppConfig, true> {
   const values: Record<string, unknown> = {
     'payments.webhookSecret': SECRET,
     'payments.apiKey': API_KEY,
+    'payments.timeoutMs': TIMEOUT_MS,
     ...overrides,
   };
 
@@ -40,6 +48,17 @@ function configStub(
  */
 function stripeOf(provider: StripePaymentProvider): Stripe {
   return (provider as unknown as { stripe: Stripe }).stripe;
+}
+
+/**
+ * The SDK's resolved option bag. `getApiField()` is the public accessor but is
+ * typed `any` (its `_api` member is), which `no-unsafe-argument` forbids
+ * passing to expect() — so the reach is narrowed once, here, as stripeOf()
+ * does for the client itself.
+ */
+function timeoutOf(provider: StripePaymentProvider): number {
+  return (stripeOf(provider) as unknown as { _api: { timeout: number } })._api
+    .timeout;
 }
 
 type CreateArgs = [Stripe.PaymentIntentCreateParams, Stripe.RequestOptions?];
@@ -60,6 +79,20 @@ function stripeIntent(
     currency: 'usd',
     ...overrides,
   } as Stripe.PaymentIntent;
+}
+
+/**
+ * The error the SDK raises for an id the provider does not recognise:
+ * `invalid_request_error` / `resource_missing`, HTTP 404 (docs cited at the
+ * tests below).
+ */
+function resourceMissing(): Stripe.errors.StripeInvalidRequestError {
+  return new Stripe.errors.StripeInvalidRequestError({
+    type: 'invalid_request_error',
+    code: 'resource_missing',
+    statusCode: 404,
+    message: 'No such payment_intent: pi_gone',
+  });
 }
 
 /**
@@ -150,6 +183,17 @@ describe('StripePaymentProvider', () => {
     it('pins the API version to the one the installed SDK ships', () => {
       expect(STRIPE_API_VERSION).toBe('2026-08-26.dahlia');
     });
+
+    // Phase 5, spec §15.2. Previously absent, so a hung provider call could
+    // hang a maintenance sweep indefinitely (the SDK's own default is 80s).
+    it('constructs the client with the timeout from configuration', () => {
+      expect(timeoutOf(provider)).toBe(TIMEOUT_MS);
+      expect(
+        timeoutOf(
+          new StripePaymentProvider(configStub({ 'payments.timeoutMs': 2500 })),
+        ),
+      ).toBe(2500);
+    });
   });
 
   describe('createPayment', () => {
@@ -214,6 +258,10 @@ describe('StripePaymentProvider', () => {
         clientSecret: 'pi_created_secret',
         amountMinorUnits: 2500,
         currency: 'USD',
+        // Not special-cased: the shared mapper reads the real intent's
+        // 'requires_payment_method' and maps it like every other non-success
+        // value (spec §7.4).
+        status: 'pending',
       });
     });
 
@@ -251,15 +299,132 @@ describe('StripePaymentProvider', () => {
         clientSecret: 'pi_test_1_secret',
         amountMinorUnits: 1000,
         currency: 'USD',
+        status: 'pending',
       });
     });
 
     // The port declares Promise<ProviderPayment> with NO not-found variant, and
     // FakePaymentProvider rejects. The real adapter must match, not widen it.
     it('rejects when the provider does not know the payment', async () => {
-      retrieve.mockRejectedValue(new Error('No such payment_intent: pi_gone'));
+      retrieve.mockRejectedValue(resourceMissing());
 
-      await expect(provider.retrievePayment('pi_gone')).rejects.toThrow();
+      await expect(provider.retrievePayment('pi_gone')).rejects.toThrow(
+        // Phase 5: the class, not a bare toThrow(). `rejects.toThrow()` with
+        // no argument passes for ANY rejection, so it proves nothing about
+        // §7.3's classification — and it is the shape the next reader copies.
+        ProviderPaymentNotFoundError,
+      );
+    });
+
+    /*
+     * Phase 5. Both values below are READ FROM STRIPE'S DOCUMENTATION for the
+     * pinned API version, not inferred from the SDK types:
+     *
+     *   https://docs.stripe.com/api/payment_intents/object — `status` (enum)
+     *     "Status of this PaymentIntent, one of `requires_payment_method`,
+     *      `requires_confirmation`, `requires_action`, `processing`,
+     *      `requires_capture`, `canceled`, or `succeeded`."
+     *     and, for the one success member: "`succeeded` — The PaymentIntent
+     *     has succeeded."
+     */
+    it("maps only the documented success value to 'succeeded'", async () => {
+      retrieve.mockResolvedValue(stripeIntent({ status: 'succeeded' }));
+
+      await expect(
+        provider.retrievePayment('pi_test_1'),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+    });
+
+    it("maps every other status, listed or not, to 'pending'", async () => {
+      const nonSuccess: Stripe.PaymentIntent.Status[] = [
+        // The full enum from the page cited above, minus 'succeeded'. Written
+        // out rather than sampled.
+        'requires_payment_method',
+        'requires_confirmation',
+        'requires_action',
+        'processing',
+        'requires_capture',
+        'canceled',
+        // THE ALLOWLIST PROPERTY — that an UNKNOWN status maps to 'pending'
+        // — pinned deliberately rather than relied on as a side effect of some
+        // fixture omitting `status`. This value is in no Stripe enum; it
+        // stands in for a member a future API version adds. The SDK itself
+        // expects that: `PaymentIntent.Status` ends in `OtherString`
+        // (node_modules/stripe/cjs/shared.d.ts: "your integration should be
+        // prepared to handle enum variants that are listed in the API
+        // Documentation (but not the SDK)").
+        //
+        // What this pins is the MAPPING, not a safety property. 'pending' is
+        // not a universally fail-closed answer: reconciliation treats it
+        // conservatively (no false PROVIDER_SUCCESS_LOCAL_NOT_PAID finding),
+        // but the expiry sweep treats it permissively — 'pending' is what puts
+        // an order on the vetted list and releases its stock, while
+        // 'succeeded' is what vetoes the expiry. So an unknown future status
+        // that actually means "paid" would be expired as abandoned, and this
+        // test cannot catch that. The adapter comment records the trade and
+        // says to re-evaluate when the pinned API version moves.
+        'requires_a_status_this_sdk_has_never_heard_of',
+      ];
+
+      for (const status of nonSuccess) {
+        retrieve.mockResolvedValue(stripeIntent({ status }));
+
+        const mapped = await provider.retrievePayment('pi_test_1');
+
+        // Paired with the input so a failure names the status that broke it;
+        // a bare toMatchObject would print only 'succeeded' vs 'pending'.
+        expect([status, mapped.status]).toEqual([status, 'pending']);
+      }
+    });
+
+    /*
+     *   https://docs.stripe.com/error-codes — `resource_missing`
+     *     "The ID provided isn't valid. Either the resource doesn't exist, or
+     *      an ID for a different resource has been provided."
+     *   https://docs.stripe.com/api/errors — HTTP 404 "Not Found | The
+     *     requested resource doesn't exist.", error type
+     *     `invalid_request_error`.
+     */
+    it('translates the provider resource-missing error to ProviderPaymentNotFoundError', async () => {
+      retrieve.mockRejectedValue(resourceMissing());
+
+      await expect(provider.retrievePayment('pi_gone')).rejects.toThrow(
+        ProviderPaymentNotFoundError,
+      );
+    });
+
+    // §7.3's whole point: not-found and unreachable are different facts, and
+    // reconciliation turns them into different findings. `rejects.toThrow(Error)`
+    // would pass for both, so each asserts the class.
+    it('leaves every other provider failure a generic rejection', async () => {
+      const failures: unknown[] = [
+        new Stripe.errors.StripeConnectionError({
+          message: 'An error occurred with our connection to Stripe.',
+        }),
+        new Stripe.errors.StripeAPIError({ message: 'Server error' }),
+        new Stripe.errors.StripeRateLimitError({
+          code: 'rate_limit',
+          message: 'Too many requests',
+        }),
+        // Same error CLASS as the not-found above, different code: the
+        // classification must read the code, not just the class.
+        new Stripe.errors.StripeInvalidRequestError({
+          code: 'parameter_unknown',
+          message: 'Received unknown parameter',
+        }),
+        new Error('socket hang up'),
+      ];
+
+      for (const failure of failures) {
+        retrieve.mockRejectedValue(failure);
+
+        const error: unknown = await provider
+          .retrievePayment('pi_test_1')
+          .catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(Error);
+        expect(error).not.toBeInstanceOf(ProviderPaymentNotFoundError);
+      }
     });
   });
 

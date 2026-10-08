@@ -4,6 +4,8 @@ import { MarkPaidOutcome, OrdersService } from './orders.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { ProductsService } from '../products/products.service';
+import { MaintenanceJobName } from '../maintenance/maintenance-job-name.enum';
+import { MaintenanceLeaseService } from '../maintenance/maintenance-lease.service';
 
 type WhereArgs = [Record<string, unknown>];
 
@@ -47,6 +49,7 @@ describe('OrdersService', () => {
     service = new OrdersService(
       prisma as unknown as PrismaService,
       products as unknown as ProductsService,
+      {} as unknown as MaintenanceLeaseService,
     );
   });
 
@@ -164,6 +167,7 @@ describe('OrdersService.cancel', () => {
     service = new OrdersService(
       prisma as unknown as PrismaService,
       products as unknown as ProductsService,
+      {} as unknown as MaintenanceLeaseService,
     );
   });
 
@@ -227,6 +231,27 @@ describe('OrdersService.cancel', () => {
       ConflictException,
     );
     // The whole point of the branch: a paid order's stock is never given back.
+    expect(products.incrementStock).not.toHaveBeenCalled();
+  });
+
+  it('409s on an EXPIRED order and restores no stock a second time', async () => {
+    // Phase 5. The expiry sweep already restored this order's stock, so the
+    // already-cancelled path's idempotent 200 would be wrong twice over: it
+    // would read as "we cancelled it for you", and a restore here would hand
+    // back units the sweep has already returned to the catalogue.
+    txMock.order.updateMany.mockResolvedValue({ count: 0 });
+    txMock.order.findFirst.mockResolvedValue({
+      id: 'order-1',
+      status: OrderStatus.EXPIRED,
+      items: [],
+    });
+
+    await expect(service.cancel('user-1', 'order-1')).rejects.toThrow(
+      'Order has expired',
+    );
+    await expect(service.cancel('user-1', 'order-1')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
     expect(products.incrementStock).not.toHaveBeenCalled();
   });
 
@@ -305,6 +330,7 @@ describe('OrdersService.markPaid', () => {
     service = new OrdersService(
       basePrisma as unknown as PrismaService,
       {} as unknown as ProductsService,
+      {} as unknown as MaintenanceLeaseService,
     );
   });
 
@@ -340,6 +366,19 @@ describe('OrdersService.markPaid', () => {
     ).toBe('cancelled');
   });
 
+  it('returns "expired" when the CAS misses and the order is EXPIRED', async () => {
+    // Phase 5. Distinct from 'cancelled': a payment arriving for an order the
+    // expiry sweep already released is the one case where stock went back on
+    // sale while money moved, and the webhook needs to tell it apart to log it
+    // as what it is. The transition is still refused either way.
+    tx.order.updateMany.mockResolvedValue({ count: 0 });
+    tx.order.findUnique.mockResolvedValue({ status: OrderStatus.EXPIRED });
+
+    expect(
+      await service.markPaid(tx as unknown as Prisma.TransactionClient, 'o'),
+    ).toBe('expired');
+  });
+
   it('returns "not-found" for an unknown order, reading through the same tx', async () => {
     tx.order.updateMany.mockResolvedValue({ count: 0 });
     tx.order.findUnique.mockResolvedValue(null);
@@ -362,6 +401,7 @@ describe('OrdersService.markPaid', () => {
     }> = [
       { row: { status: OrderStatus.PAID }, outcome: 'already-paid' },
       { row: { status: OrderStatus.CANCELLED }, outcome: 'cancelled' },
+      { row: { status: OrderStatus.EXPIRED }, outcome: 'expired' },
       { row: null, outcome: 'not-found' },
     ];
 
@@ -402,5 +442,151 @@ describe('OrdersService.markPaid', () => {
     expect(tx.order.updateMany).toHaveBeenCalledTimes(1);
     expect(tx.order.findUnique).toHaveBeenCalledTimes(1);
     expectBasePrismaUntouched();
+  });
+});
+
+describe('OrdersService.expire', () => {
+  let service: OrdersService;
+  // Returned by the $transaction mock, so every "did it use tx?" assertion
+  // fails if expire() ever slips and reaches for this.prisma instead.
+  let txMock: {
+    order: {
+      updateMany: jest.Mock<Promise<{ count: number }>, UpdateManyArgs>;
+    };
+    orderItem: { findMany: jest.Mock<Promise<unknown[]>, [unknown]> };
+  };
+  let prisma: {
+    $transaction: jest.Mock<
+      Promise<unknown>,
+      [(tx: unknown) => Promise<unknown>]
+    >;
+  };
+  let products: {
+    incrementStock: jest.Mock<Promise<void>, [unknown, string, number]>;
+  };
+  let lease: {
+    assertHeld: jest.Mock<Promise<void>, [unknown, MaintenanceJobName]>;
+  };
+
+  beforeEach(() => {
+    txMock = {
+      order: {
+        updateMany: jest
+          .fn<Promise<{ count: number }>, UpdateManyArgs>()
+          .mockResolvedValue({ count: 1 }),
+      },
+      orderItem: {
+        findMany: jest.fn<Promise<unknown[]>, [unknown]>().mockResolvedValue([
+          { productId: 'p-a', quantity: 2 },
+          { productId: 'p-b', quantity: 3 },
+        ]),
+      },
+    };
+    prisma = {
+      $transaction: jest
+        .fn<Promise<unknown>, [(tx: unknown) => Promise<unknown>]>()
+        .mockImplementation((callback) => callback(txMock)),
+    };
+    products = {
+      incrementStock: jest
+        .fn<Promise<void>, [unknown, string, number]>()
+        .mockResolvedValue(undefined),
+    };
+    lease = {
+      assertHeld: jest
+        .fn<Promise<void>, [unknown, MaintenanceJobName]>()
+        .mockResolvedValue(undefined),
+    };
+
+    service = new OrdersService(
+      prisma as unknown as PrismaService,
+      products as unknown as ProductsService,
+      lease as unknown as MaintenanceLeaseService,
+    );
+  });
+
+  it('expires the order and restores every line in one transaction', async () => {
+    await expect(service.expire('order-1')).resolves.toBe('expired');
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(products.incrementStock).toHaveBeenCalledTimes(2);
+    expect(products.incrementStock).toHaveBeenNthCalledWith(
+      1,
+      txMock,
+      'p-a',
+      2,
+    );
+    expect(products.incrementStock).toHaveBeenNthCalledWith(
+      2,
+      txMock,
+      'p-b',
+      3,
+    );
+  });
+
+  it('claims the order with a PENDING predicate and stamps expiredAt', async () => {
+    await service.expire('order-1');
+
+    const [args] = txMock.order.updateMany.mock.calls[0];
+
+    // No userId predicate: no user owns this transition.
+    expect(args.where).toEqual({
+      id: 'order-1',
+      status: OrderStatus.PENDING,
+    });
+    expect(args.data).toMatchObject({ status: OrderStatus.EXPIRED });
+    expect(args.data.expiredAt).toBeInstanceOf(Date);
+  });
+
+  it('restores nothing when the CAS loses the race', async () => {
+    txMock.order.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(service.expire('order-1')).resolves.toBe('raced');
+    expect(products.incrementStock).not.toHaveBeenCalled();
+  });
+
+  it('fences on the lease, inside the transaction, before the CAS', async () => {
+    // Spec §4.5 effect 3. Fencing after the CAS would let an instance that
+    // lost the lease transition the order before noticing.
+    await service.expire('order-1');
+
+    expect(lease.assertHeld).toHaveBeenCalledWith(
+      txMock,
+      MaintenanceJobName.ORDER_EXPIRY,
+    );
+    expect(lease.assertHeld.mock.invocationCallOrder[0]).toBeLessThan(
+      txMock.order.updateMany.mock.invocationCallOrder[0],
+    );
+  });
+
+  /**
+   * The structural half of "no provider call inside a transaction" for THIS
+   * service (spec §5.5, and Phase 4's absolute rule).
+   *
+   * Behavioural assertions cannot cover it here: the sweep's own spec records
+   * only its Phase 1 client while `orders.expire` is a mock, so a provider
+   * call added inside expire()'s $transaction would be invisible to every
+   * existing structural test. What CAN be pinned is the absence itself —
+   * `design:paramtypes` is emitted by `emitDecoratorMetadata` for the
+   * @Injectable() constructor, so injecting a provider (or any other
+   * I/O-capable dependency) changes this array and fails here. A token
+   * injected with @Inject() for an interface type lands as `Object`, so even
+   * PAYMENT_PROVIDER cannot slip in unseen.
+   */
+  it('injects nothing capable of I/O, so no provider is reachable from the transaction', () => {
+    expect(Reflect.getMetadata('design:paramtypes', OrdersService)).toEqual([
+      PrismaService,
+      ProductsService,
+      MaintenanceLeaseService,
+    ]);
+  });
+
+  it('restores in ascending productId order, through the transaction client', async () => {
+    await service.expire('order-1');
+
+    expect(txMock.orderItem.findMany.mock.calls[0][0]).toMatchObject({
+      where: { orderId: 'order-1' },
+      orderBy: { productId: 'asc' },
+    });
   });
 });

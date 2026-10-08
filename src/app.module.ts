@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
+import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import configuration from './config/configuration';
 import { envValidationSchema } from './config/env.validation';
@@ -12,6 +13,7 @@ import { ProductsModule } from './modules/products/products.module';
 import { CartModule } from './modules/cart/cart.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { PaymentsModule } from './modules/payments/payments.module';
+import { MaintenanceModule } from './modules/maintenance/maintenance.module';
 import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
 import { RolesGuard } from './modules/auth/guards/roles.guard';
 
@@ -40,6 +42,10 @@ import { RolesGuard } from './modules/auth/guards/roles.guard';
     // start seeing 429s — confirm that is acceptable before deploying behind
     // one.
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
+    // In-process cron (Phase 5, spec section 9.1). No queue, no broker: the
+    // scheduler lives in the API process and mutual exclusion across replicas
+    // is the maintenance_leases row, not a lock held by a worker.
+    ScheduleModule.forRoot(),
     PrismaModule,
     HealthModule,
     AuthModule,
@@ -48,6 +54,7 @@ import { RolesGuard } from './modules/auth/guards/roles.guard';
     CartModule,
     OrdersModule,
     PaymentsModule,
+    MaintenanceModule,
   ],
   providers: [
     // ThrottlerGuard is registered under its own token first, then aliased

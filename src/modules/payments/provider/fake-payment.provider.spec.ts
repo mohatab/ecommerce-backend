@@ -12,6 +12,7 @@ import {
   AmountLimits,
   CreatePaymentInput,
   PaymentProvider,
+  ProviderPaymentNotFoundError,
   SUPPORTED_EVENT_TYPE,
 } from './payment-provider';
 
@@ -324,10 +325,67 @@ describe('FakePaymentProvider', () => {
       ).resolves.toEqual(created);
     });
 
-    it('throws for an unknown id', async () => {
-      await expect(provider.retrievePayment('pi_missing')).rejects.toThrow(
-        'Unknown payment pi_missing',
+    // Phase 5, spec §7.3: not-found is an ERROR, and it is a DISTINGUISHABLE
+    // one. `rejects.toThrow(Error)` would pass for both this and
+    // failNextRetrieve() below, so both assert the class.
+    it('rejects with ProviderPaymentNotFoundError for an unknown id', async () => {
+      await expect(provider.retrievePayment('pi_never_minted')).rejects.toThrow(
+        ProviderPaymentNotFoundError,
       );
+    });
+  });
+
+  describe('status (Phase 5)', () => {
+    it('reports pending for a freshly created intent', async () => {
+      const created = await provider.createPayment(input);
+
+      expect(created.status).toBe('pending');
+      await expect(
+        provider.retrievePayment(created.providerPaymentId),
+      ).resolves.toMatchObject({ status: 'pending' });
+    });
+
+    it('reports succeeded once the test control marks it so', async () => {
+      const created = await provider.createPayment(input);
+
+      provider.markNextRetrieveSucceeded(created.providerPaymentId);
+
+      await expect(
+        provider.retrievePayment(created.providerPaymentId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+    });
+
+    it('rejects with a generic error when failNextRetrieve is armed', async () => {
+      const created = await provider.createPayment(input);
+
+      provider.failNextRetrieve();
+
+      const error: unknown = await provider
+        .retrievePayment(created.providerPaymentId)
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(Error);
+      // The load-bearing half: an unreachable provider is NOT a not-found.
+      expect(error).not.toBeInstanceOf(ProviderPaymentNotFoundError);
+    });
+
+    // notFoundNextRetrieve() is the mirror image: a KNOWN id the provider
+    // claims not to recognise. Without it the only way to produce a not-found
+    // is an id that was never minted, which cannot stand in for the
+    // reconciliation case (§8) where a Payment row exists locally.
+    it('rejects a known id with ProviderPaymentNotFoundError when notFoundNextRetrieve is armed', async () => {
+      const created = await provider.createPayment(input);
+
+      provider.notFoundNextRetrieve();
+
+      await expect(
+        provider.retrievePayment(created.providerPaymentId),
+      ).rejects.toThrow(ProviderPaymentNotFoundError);
+
+      // One-shot, like failNextCreate: the next call succeeds again.
+      await expect(
+        provider.retrievePayment(created.providerPaymentId),
+      ).resolves.toMatchObject({ status: 'pending' });
     });
   });
 
@@ -596,5 +654,22 @@ describe('FakePaymentProvider', () => {
     await expect(
       provider.retrievePayment(created.providerPaymentId),
     ).rejects.toThrow();
+  });
+
+  // In-memory state is not cleared by truncateAll(), so a control left armed
+  // leaks into the next suite's first retrieval.
+  it('reset() disarms the retrieve controls too', async () => {
+    const created = await provider.createPayment(input);
+
+    provider.markNextRetrieveSucceeded(created.providerPaymentId);
+    provider.failNextRetrieve();
+    provider.notFoundNextRetrieve();
+    provider.reset();
+
+    const recreated = await provider.createPayment(input);
+
+    await expect(
+      provider.retrievePayment(recreated.providerPaymentId),
+    ).resolves.toMatchObject({ status: 'pending' });
   });
 });

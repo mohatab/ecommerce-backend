@@ -22,6 +22,24 @@ export interface AppConfig {
     provider: 'stripe' | 'fake';
     apiKey: string | undefined;
     webhookSecret: string;
+    timeoutMs: number;
+  };
+  maintenance: {
+    jobsEnabled: boolean;
+    orderExpiryCron: string;
+    orderExpiryTtlMinutes: number;
+    orderExpiryPaymentStartedTtlHours: number;
+    orderExpiryBatchSize: number;
+    purgeCron: string;
+    purgeBatchSize: number;
+    refreshTokenRetentionDays: number;
+    paymentEventRetentionDays: number;
+    reconcileCron: string;
+    reconcileMinAgeMinutes: number;
+    reconcileLookbackDays: number;
+    reconcileBatchSize: number;
+    reconcilePrecheckFailureThreshold: number;
+    leaseSeconds: number;
   };
 }
 
@@ -91,5 +109,52 @@ export default (): AppConfig => ({
     // same reason: an empty HMAC key does not fail loudly, it verifies
     // happily, and anyone who guesses it can forge paid-order events.
     webhookSecret: requireEnv('PAYMENT_WEBHOOK_SECRET'),
+    timeoutMs: parseInt(process.env.PAYMENT_PROVIDER_TIMEOUT_MS ?? '10000', 10),
+  },
+  maintenance: {
+    // Opt-out, not opt-in: a deployment that forgets the variable still runs
+    // its maintenance. Only the literal 'false' disables it.
+    jobsEnabled: process.env.MAINTENANCE_JOBS_ENABLED !== 'false',
+    orderExpiryCron: process.env.ORDER_EXPIRY_CRON ?? '0 */5 * * * *',
+    orderExpiryTtlMinutes: parseInt(
+      process.env.ORDER_EXPIRY_TTL_MINUTES ?? '30',
+      10,
+    ),
+    orderExpiryPaymentStartedTtlHours: parseInt(
+      process.env.ORDER_EXPIRY_PAYMENT_STARTED_TTL_HOURS ?? '24',
+      10,
+    ),
+    orderExpiryBatchSize: parseInt(
+      process.env.ORDER_EXPIRY_BATCH_SIZE ?? '100',
+      10,
+    ),
+    purgeCron: process.env.MAINTENANCE_PURGE_CRON ?? '0 0 3 * * *',
+    purgeBatchSize: parseInt(
+      process.env.MAINTENANCE_PURGE_BATCH_SIZE ?? '1000',
+      10,
+    ),
+    refreshTokenRetentionDays: parseInt(
+      process.env.REFRESH_TOKEN_RETENTION_DAYS ?? '30',
+      10,
+    ),
+    paymentEventRetentionDays: parseInt(
+      process.env.PAYMENT_EVENT_RETENTION_DAYS ?? '90',
+      10,
+    ),
+    reconcileCron: process.env.RECONCILE_CRON ?? '0 */15 * * * *',
+    reconcileMinAgeMinutes: parseInt(
+      process.env.RECONCILE_MIN_AGE_MINUTES ?? '15',
+      10,
+    ),
+    reconcileLookbackDays: parseInt(
+      process.env.RECONCILE_LOOKBACK_DAYS ?? '30',
+      10,
+    ),
+    reconcileBatchSize: parseInt(process.env.RECONCILE_BATCH_SIZE ?? '100', 10),
+    reconcilePrecheckFailureThreshold: parseInt(
+      process.env.RECONCILE_PRECHECK_FAILURE_THRESHOLD ?? '3',
+      10,
+    ),
+    leaseSeconds: parseInt(process.env.MAINTENANCE_LEASE_SECONDS ?? '300', 10),
   },
 });

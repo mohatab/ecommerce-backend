@@ -75,6 +75,18 @@ export class PaymentsService {
       throw new ConflictException('Order is already paid');
     }
 
+    // Phase 5. Same shape and same 409 as the two guards above, and above
+    // the provider call for the same reason they are: without this, EXPIRED
+    // is treated exactly as PENDING on the one path that moves money, and an
+    // intent is created for inventory the expiry sweep already returned to
+    // the catalogue. NOT §6.3's 422 — that is for an amount the provider
+    // cannot process; this is a terminal state the caller did not cause,
+    // which is what 409 means here and in cancel()'s matching branch. The
+    // wording matches cancel()'s deliberately: one fact, one term.
+    if (order.status === OrderStatus.EXPIRED) {
+      throw new ConflictException('Order has expired');
+    }
+
     // 2. Pure, no I/O, and BEFORE any provider call: an unpayable order must
     //    never create an intent (C4, A1). 422 not 409 — the request is
     //    coherent and the order is fine; it is the amount that cannot be
