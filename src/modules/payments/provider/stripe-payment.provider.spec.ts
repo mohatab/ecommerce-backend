@@ -345,17 +345,24 @@ describe('StripePaymentProvider', () => {
         'processing',
         'requires_capture',
         'canceled',
-        // THE FAIL-CLOSED PROPERTY, pinned deliberately rather than relied on
-        // as a side effect of some fixture omitting `status`. This value is in
-        // no Stripe enum; it stands in for a member a future API version adds.
-        // The SDK itself expects that — `PaymentIntent.Status` ends in
-        // `OtherString` (node_modules/stripe/cjs/shared.d.ts: "your
-        // integration should be prepared to handle enum variants that are
-        // listed in the API Documentation (but not the SDK)") — which is why
-        // the mapping must be an allowlist of the one success value and never
-        // a denylist of the known failures. A denylist maps this to
-        // 'succeeded', and 'succeeded' is what tells Task 4's sweep it may
-        // release an order's stock.
+        // THE ALLOWLIST PROPERTY — that an UNKNOWN status maps to 'pending'
+        // — pinned deliberately rather than relied on as a side effect of some
+        // fixture omitting `status`. This value is in no Stripe enum; it
+        // stands in for a member a future API version adds. The SDK itself
+        // expects that: `PaymentIntent.Status` ends in `OtherString`
+        // (node_modules/stripe/cjs/shared.d.ts: "your integration should be
+        // prepared to handle enum variants that are listed in the API
+        // Documentation (but not the SDK)").
+        //
+        // What this pins is the MAPPING, not a safety property. 'pending' is
+        // not a universally fail-closed answer: reconciliation treats it
+        // conservatively (no false PROVIDER_SUCCESS_LOCAL_NOT_PAID finding),
+        // but the expiry sweep treats it permissively — 'pending' is what puts
+        // an order on the vetted list and releases its stock, while
+        // 'succeeded' is what vetoes the expiry. So an unknown future status
+        // that actually means "paid" would be expired as abandoned, and this
+        // test cannot catch that. The adapter comment records the trade and
+        // says to re-evaluate when the pinned API version moves.
         'requires_a_status_this_sdk_has_never_heard_of',
       ];
 

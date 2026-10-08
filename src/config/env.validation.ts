@@ -81,7 +81,12 @@ export const envValidationSchema = Joi.object({
     .min(1)
     .max(10000)
     .default(1000),
-  // Floor of 7 == JWT_REFRESH_TTL. Below it the purge would delete LIVE tokens.
+  // Floor of 7 == JWT_REFRESH_TTL. It does NOT stop the purge deleting a live
+  // token — the `expiresAt` cutoff does that, at any retention value, because a
+  // live token's expiresAt is in the future and never matches. What the floor
+  // protects is the EXPIRED rows that are still reuse-detection evidence:
+  // below one refresh TTL, a family revoked on replay could be purged before
+  // the window in which that replay is still being investigated.
   REFRESH_TOKEN_RETENTION_DAYS: Joi.number().integer().min(7).default(30),
   // Floor of 30: payment_events is the webhook idempotency ledger; deleting a
   // row makes a pre-cutoff replay newly processable.

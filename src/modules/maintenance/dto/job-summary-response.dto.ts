@@ -31,8 +31,15 @@ export class JobSummaryResponseDto {
   /**
    * Present only when `status` is `skipped`. `lease-held` never appears here —
    * the controller turns that case into a 409 — so in practice this is
-   * `lease-missing`. `disabled` is currently unreachable: the scheduler
-   * registers no cron when jobs are disabled rather than returning it.
+   * `lease-missing`.
+   *
+   * **`disabled` is unreachable today** and is documented anyway: the
+   * scheduler registers no cron at all when `MAINTENANCE_JOBS_ENABLED=false`,
+   * so nothing ever returns it. It stays in the Swagger enum because it is a
+   * member of `JobSummary['reason']`, and a documented enum narrower than the
+   * type it describes is the worse defect — a client written against the docs
+   * would reject a value the type permits. Remove it from both, or from
+   * neither.
    */
   @ApiPropertyOptional({ enum: ['lease-held', 'lease-missing', 'disabled'] })
   reason?: 'lease-held' | 'lease-missing' | 'disabled';

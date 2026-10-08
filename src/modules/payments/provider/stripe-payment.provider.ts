@@ -219,9 +219,38 @@ function toProviderPayment(intent: Stripe.PaymentIntent): ProviderPayment {
     // `succeeded`", with "`succeeded` — The PaymentIntent has succeeded."
     //
     // Everything else — including any member a future API version adds — maps
-    // to 'pending', which is the fail-closed direction: 'pending' means "do
-    // not release this stock", so a wrong 'pending' only delays an expiry
-    // while a wrong 'succeeded' would release stock for a paid order.
+    // to 'pending'. That is conservative FOR THE CURRENTLY PINNED PROVIDER
+    // CONTRACT, whose status set is fully enumerated above and every member of
+    // which, other than 'succeeded', genuinely means not-paid. It is a
+    // compatibility fallback for an unrecognised value, NOT a universal
+    // fail-safe guarantee.
+    //
+    // The two values have DIFFERENT DOWNSTREAM CONSEQUENCES, and they point in
+    // opposite directions depending on the consumer:
+    //
+    //   Expiry sweep (order-expiry.service.ts): 'succeeded' VETOES the expiry
+    //     and holds the order's stock; 'pending' puts the order on the vetted
+    //     list, so the order is expired and its stock released.
+    //   Reconciliation (payment-reconciliation.service.ts): 'succeeded' can
+    //     produce a PROVIDER_SUCCESS_LOCAL_NOT_PAID finding; 'pending' does
+    //     not.
+    //
+    // So THERE IS NO UNIVERSAL FAIL-CLOSED DIRECTION ACROSS THE TWO CONSUMERS.
+    // An earlier version of this comment asserted that 'pending' means "do not
+    // release this stock" — that was FALSE for the expiry consumer, which is
+    // the consumer that touches inventory. For the sweep, 'pending' is the
+    // permissive direction; for reconciliation, it is the quiet one.
+    //
+    // Why the mapping still ends at 'pending': the trade is a stock release
+    // that no currently reachable status value can cause against a concrete
+    // stream of false findings in the alerting path. That rests on the pinned
+    // contract, not on the mapping being safe in general.
+    //
+    // RE-EVALUATE WHEN THE PINNED API VERSION MOVES — an open risk, not a
+    // solved problem (spec §16.3). A new status meaning "paid" that this
+    // allowlist does not know would be expired as abandoned by the sweep, and
+    // no test here can catch that: the SDK's own `OtherString` tail says new
+    // members are expected.
     //
     // Shared with createPayment on purpose: a fresh intent is
     // 'requires_payment_method', so it maps to 'pending' with no special case.

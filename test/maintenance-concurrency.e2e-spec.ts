@@ -209,11 +209,21 @@ describe('Maintenance concurrency (e2e)', () => {
   });
 
   it('restores every product exactly once with twenty-five cancels racing one sweep', async () => {
-    // One order is one coin flip; twenty-five independently interleave the
-    // cancel's commit against each order's own transition, which is what
-    // makes the read-check-update control (C-E1) reproducible rather than
-    // lucky. Each order holds its own product, so a double restoration shows
-    // up as that product's stock exceeding its initial value.
+    // Twenty-five orders, each holding its own product, so a double
+    // restoration shows up as that product's stock exceeding its initial
+    // value and the failure names the product.
+    //
+    // This shape was written to make the read-check-update control (C-E1)
+    // reproducible rather than lucky, and IT DID NOT: run three times against
+    // the naive implementation, it stayed green, because all twenty-five
+    // cancels commit before the sweep reaches the first order's read, so the
+    // naive read sees CANCELLED and refuses by itself. C-E1 reproduces only
+    // under a forced interleaving — a delay inside cancel()'s transaction
+    // holding the order's row lock — which is strong evidence that the CAS is
+    // what prevents the double restoration and weak evidence that this suite
+    // would catch the regression unaided. Spec §14.4's amendment and
+    // task-7-report.md record it as a qualified result; do not read this test
+    // as the control.
     const lines: { product: Product; order: OrderWithItems }[] = [];
 
     for (let index = 0; index < 25; index += 1) {

@@ -1302,9 +1302,31 @@ an oversight.
 1. **Enum-value addition ordering** (§15.1). Verify by running the migration from
    scratch against the project's PostgreSQL 16.
 2. **Provider status mapping** (§7.4). Must be written from provider
-   documentation, not inferred. If it cannot be verified at implementation time,
-   map conservatively to `'pending'` — the fail-closed direction — and record the
-   gap.
+   documentation, not inferred. Map an unrecognised status to `'pending'` and
+   record the gap.
+
+   **Amended after implementation: `'pending'` is *not* "the fail-closed
+   direction", and this risk entry said it was.** The two consumers want
+   opposite defaults, and nothing in the original text noticed:
+
+   - **The expiry sweep** treats `'succeeded'` as a **veto** that holds stock,
+     and `'pending'` as permission to expire, which **releases** stock. For the
+     sweep, `'pending'` is the **permissive** direction — a wrongly-`'pending'`
+     unknown status releases a paid order's stock.
+   - **Reconciliation** files `PROVIDER_SUCCESS_LOCAL_NOT_PAID` on
+     `'succeeded'`. For reconciliation, `'pending'` is the **conservative**
+     direction — it avoids a false finding, where `'succeeded'` would emit one
+     per payment per pass.
+
+   The mapping still ends at `'pending'`, on a stated trade rather than a safety
+   claim: a **hypothetical** stock release against a **concrete** stream of
+   false findings in the alerting path. It is safe only because the provider's
+   status enum is fully enumerated today and every non-`'succeeded'` member
+   genuinely means not-paid.
+
+   **This is therefore an open risk to re-evaluate when the pinned API version
+   moves**, not a solved problem. A new status meaning "paid" that the allowlist
+   does not know would be expired as abandoned, and no test can catch it.
 
 The advisory-lock connection-affinity risk that previously sat here is **resolved
 by D6**: the lease needs no connection affinity, so the risk no longer exists.

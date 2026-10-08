@@ -227,7 +227,7 @@ it out twice.
 | `RECONCILE_LOOKBACK_DAYS` | `30` | |
 | `RECONCILE_BATCH_SIZE` | `100` | |
 | `RECONCILE_PRECHECK_FAILURE_THRESHOLD` | `3` | Consecutive failed reads before a `PROVIDER_UNREACHABLE` finding |
-| `MAINTENANCE_LEASE_SECONDS` | `300` | Floor 30 — shorter than one heartbeat interval would lapse a live run |
+| `MAINTENANCE_LEASE_SECONDS` | `300` | Floor 30. A lapsed lease is the only way a crashed holder's job recovers, so this also bounds how long that job stalls; the heartbeat renews at a third of it, so a very short lease spends the tick renewing |
 
 `POST /api/v1/admin/maintenance/:job/run` runs any of the three immediately, through
 the same runner the schedule uses, and returns **409** if that job is already running.
