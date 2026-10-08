@@ -77,9 +77,18 @@ describe('OrderExpiryService', () => {
       },
       // A recording mock that must stay untouched: the sweep itself opens no
       // transaction, because a provider call may never happen inside one.
+      //
+      // It RUNS its callback rather than swallowing it, which matters only
+      // when this assertion is under test: a mock that resolved undefined
+      // would make a mutation moving the provider read into a transaction
+      // fail first on `retrievePayment` never being called — a call count
+      // that went to zero because the callback never ran, not because the
+      // read moved. Executing the callback leaves the sweep's behaviour
+      // intact, so the only thing that fails is the assertion that names the
+      // property: no transaction was opened (control C-E4).
       $transaction: jest
-        .fn<Promise<unknown>, [unknown]>()
-        .mockResolvedValue(undefined),
+        .fn<Promise<unknown>, [(tx: unknown) => Promise<unknown>]>()
+        .mockImplementation((callback) => callback(prisma)),
     };
     orders = {
       expire: jest

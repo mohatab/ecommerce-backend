@@ -387,7 +387,7 @@ describe('StripePaymentProvider', () => {
     });
 
     // §7.3's whole point: not-found and unreachable are different facts, and
-    // Task 6 turns them into different findings. `rejects.toThrow(Error)`
+    // reconciliation turns them into different findings. `rejects.toThrow(Error)`
     // would pass for both, so each asserts the class.
     it('leaves every other provider failure a generic rejection', async () => {
       const failures: unknown[] = [

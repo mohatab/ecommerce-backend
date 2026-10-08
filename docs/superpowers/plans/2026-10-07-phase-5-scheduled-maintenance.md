@@ -16,7 +16,7 @@
 
 Copied verbatim from the spec. Every task's requirements implicitly include these.
 
-- **No Redis, no BullMQ, no caching, no queue, and exactly one new runtime dependency (`@nestjs/schedule`).**
+- **No Redis, no BullMQ, no caching, no queue, and exactly one new runtime dependency (`@nestjs/schedule`).** Amended during implementation: `cron@4.4.0` is also *declared*, matching `@nestjs/schedule`'s own exact pin, because `addCronJob()` is typed in terms of `CronJob` and `@nestjs/schedule` does not re-export it. Zero packages were added to `node_modules`. See the design spec §18 item 28.
 - **No `pg_advisory_lock` or `pg_try_advisory_xact_lock` for any maintenance job**, and no code may take `E2E_LOCK_KEY` (`728374651n`). The spec rejects advisory locks for the sweeps with reasons (§9.3.1); re-introducing one contradicts D6.
 - **The webhook remains the sole writer of `OrderStatus.PAID`.** `markPaid()` is the only code in `src/` that writes it and `PaymentWebhookService` is its only caller. Phase 5 adds no writer.
 - **The provider read is a veto, never an authority (D3).** It may prevent an expiry; it may never cause a transition to `PAID`.

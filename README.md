@@ -9,7 +9,7 @@ A production-grade e-commerce backend, built as a portfolio project to demonstra
 - **Node.js** / **TypeScript** (strict mode)
 - **NestJS** — application framework
 - **PostgreSQL** + **Prisma ORM** — persistence
-- **Redis** + **BullMQ** — caching and background jobs *(added in a later phase)*
+- **`@nestjs/schedule`** — in-process cron for scheduled maintenance
 - **JWT** (`@nestjs/jwt`) — authentication, HS256 access tokens
 - **Argon2id** (`@node-rs/argon2`) — password hashing
 - **`@nestjs/throttler`** — rate limiting
@@ -20,7 +20,7 @@ A production-grade e-commerce backend, built as a portfolio project to demonstra
 
 ## Project Status
 
-This project is being built incrementally, phase by phase. Current phase: **Redis caching & BullMQ background jobs (Phase 5)**.
+This project is being built incrementally, phase by phase. Current phase: **Deployment (Phase 6)**.
 
 - ✅ Project structure, config validation, Prisma wiring, health check, Swagger, Docker (Postgres)
 - ✅ Foundation: `/api/v1` versioning, pagination primitives, Prisma error mapping, e2e harness, CI
@@ -28,7 +28,16 @@ This project is being built incrementally, phase by phase. Current phase: **Redi
 - ✅ Products: public catalog reads, admin-only writes, role-based authorization, admin bootstrap
 - ✅ Cart & orders: transactional checkout, atomic stock decrement, idempotent order creation, cancellation with exactly-once stock restore
 - ✅ Payments: provider-abstracted intent creation, idempotent initiation, signature-verified webhook as the only path to `PAID`
-- ⬜ Redis caching & BullMQ background jobs
+- ✅ Scheduled maintenance: order expiry releasing stock exactly once, retention purges for `refresh_tokens` and `payment_events`, payment reconciliation (detection only), an admin trigger and findings API — all under a fenced database lease, with no new infrastructure
+- ⬜ Deployment: container smoke test, trusted-proxy configuration, release/migration process
+
+**Redis and BullMQ are not on this list, and that is a decision rather than a gap.**
+A delayed job is a single point of loss — if the broker drops it, nothing re-derives
+the work. Every Phase 5 job is a *sweep* that re-reads the world each tick and is
+therefore self-healing, so a broker would add an operational dependency and a new
+failure mode while removing nothing. A broker earns its place when a workload is
+genuinely event-driven and non-idempotent; **transactional email** and **refunds**
+are the two candidates, and neither exists yet.
 
 ## Getting Started
 
@@ -77,7 +86,7 @@ serially by design.
 
 > The suite runs serially on purpose — see
 > [`docs/deferred-limitations.md`](docs/deferred-limitations.md), which also
-> records the accepted rate-limiting, token-purge and deployment gaps.
+> records the accepted rate-limiting and deployment gaps.
 
 ## API
 
@@ -104,9 +113,11 @@ unversioned so infrastructure probes have a stable path.
 | `DELETE /api/v1/cart/items/:productId` | **Bearer** | 204 | Idempotent; removing an absent line also returns 204 |
 | `POST /api/v1/orders` | **Bearer** | 201 / 200 | Checkout; requires an `Idempotency-Key` header (see below); 201 for a new order, 200 for a replayed key; empty cart, insufficient stock, or an unavailable product → 409; mixed currencies or an oversized total → 422 |
 | `GET /api/v1/orders` | **Bearer** | 200 | The caller's orders only, paginated, newest first |
-| `GET /api/v1/orders/:id` | **Bearer** | 200 | The caller's order only; unknown id or another user's order → 404 |
+| `GET /api/v1/orders/:id` | **Bearer** | 200 | The caller's order only; unknown id or another user's order → 404. Carries the server-authoritative `expiresAt` deadline |
 | `POST /api/v1/orders/:id/cancel` | **Bearer** | 200 | Idempotent; restores stock exactly once; unknown id or another user's order → 404 |
 | `POST /api/v1/orders/:id/payments` | **Bearer** | 201 / 200 | Creates a payment intent for the caller's own `PENDING` order, or returns the existing one — empty request body by design. 201 the first time, 200 on every replay with the same payment id, provider id and client secret; malformed id → 400; no token → 401; unknown id or another user's order → 404; the order is cancelled or already paid → 409; total outside the payable range or an unsupported currency → 422; provider unreachable → 502. **It does not complete the payment** |
+| `POST /api/v1/admin/maintenance/:job/run` | **Bearer (ADMIN)** | 200 | Runs one maintenance job synchronously, through the same runner the schedule uses. `:job` is `order-expiry`, `maintenance-purge`, or `payment-reconciliation`; anything else → 400. Already running (the lease is held) → 409. Rate-limited to 5/minute. The response is a counts-only summary — no order, payment, or customer identifier |
+| `GET /api/v1/admin/reconciliation/findings` | **Bearer (ADMIN)** | 200 | Paginated findings, **active ones (`resolvedAt IS NULL`) by default**; `?resolved=true` for the historical ones, `?kind=` to filter. An unlisted kind or a non-boolean `resolved` → 400 |
 | `POST /api/v1/payments/webhook` | public (**signature**) | 200 | The provider's signed delivery, verified over the raw request body. The only path that marks an order `PAID`. Invalid or missing signature, or an unusable payload → 400; too many deliveries → 429; a database failure mid-transaction → 500 so the provider retries. Every other authentic delivery — unknown order, amount or currency mismatch, duplicate, already-paid, cancelled order — is **200** with the event recorded and nothing else changed |
 
 Authentication is **default-deny**: a route without an explicit `@Public()` marker
@@ -172,6 +183,58 @@ records that a payment arriving after its order was cancelled is recorded but
 **not** refunded, and that nothing reconciles provider state against local state
 automatically.
 
+### Scheduled maintenance
+
+Three cron jobs run in-process (`@nestjs/schedule`), each a **sweep**: it re-reads
+the world every tick, so a missed tick costs latency and never correctness.
+
+| Job | Default schedule | What it does |
+| --- | --- | --- |
+| `order-expiry` | every 5 minutes | Expires `PENDING` orders past their deadline and restores every line's stock, atomically. Tier A (no payment attempt) after 30 minutes; tier B (a payment was initiated) after 24 hours **and** only once the provider confirms the payment did not succeed |
+| `maintenance-purge` | daily at 03:00 | Deletes `refresh_tokens` past their expiry retention and `payment_events` past theirs, oldest first, bounded per tick |
+| `payment-reconciliation` | every 15 minutes | Compares local payment and order state against the provider and records divergences. **It reports; it never mutates an order, a payment, or a product** |
+
+Only one instance may run a given job at a time. Exclusion is a `maintenance_leases`
+row claimed with a compare-and-swap and **re-asserted inside the same transaction as
+every mutation**, so an instance whose lease was taken over cannot commit. PostgreSQL
+advisory locks were deliberately rejected: Prisma pools connections with no pinning
+API, so a session-scoped lock can be released on the wrong connection and leak, and an
+xact-scoped one cannot span a sweep that makes provider calls outside transactions and
+commits one transaction per order.
+
+**The expiry sweep never marks an order paid.** It asks the provider only for
+permission *not* to expire — a veto, never an authority — and if the provider is
+unreachable, times out, or does not recognise the payment, the order is left
+`PENDING`. The signature-verified webhook remains the only path to `PAID`.
+
+An order that expires moves to `EXPIRED`, its stock returns, and cancelling it
+afterwards is a **409** — the stock is already back and cancelling again would hand
+it out twice.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MAINTENANCE_JOBS_ENABLED` | `true` | Master switch. Only the literal `false` disables every job |
+| `ORDER_EXPIRY_CRON` | `0 */5 * * * *` | Six-field expression, seconds first |
+| `ORDER_EXPIRY_TTL_MINUTES` | `30` | Tier-A deadline, stamped on the order at checkout |
+| `ORDER_EXPIRY_PAYMENT_STARTED_TTL_HOURS` | `24` | Tier-B gate, measured from `Payment.createdAt` |
+| `ORDER_EXPIRY_BATCH_SIZE` | `100` | Orders per tick |
+| `MAINTENANCE_PURGE_CRON` | `0 0 3 * * *` | |
+| `MAINTENANCE_PURGE_BATCH_SIZE` | `1000` | Rows per table per tick |
+| `REFRESH_TOKEN_RETENTION_DAYS` | `30` | Floor 7. Cut on `expiresAt`, never `createdAt` — a live token is never deleted |
+| `PAYMENT_EVENT_RETENTION_DAYS` | `90` | Floor 30. This table is the webhook idempotency ledger |
+| `RECONCILE_CRON` | `0 */15 * * * *` | |
+| `RECONCILE_MIN_AGE_MINUTES` | `15` | How settled a row must be before it is compared |
+| `RECONCILE_LOOKBACK_DAYS` | `30` | |
+| `RECONCILE_BATCH_SIZE` | `100` | |
+| `RECONCILE_PRECHECK_FAILURE_THRESHOLD` | `3` | Consecutive failed reads before a `PROVIDER_UNREACHABLE` finding |
+| `MAINTENANCE_LEASE_SECONDS` | `300` | Floor 30 — shorter than one heartbeat interval would lapse a live run |
+
+`POST /api/v1/admin/maintenance/:job/run` runs any of the three immediately, through
+the same runner the schedule uses, and returns **409** if that job is already running.
+See [`docs/deferred-limitations.md`](docs/deferred-limitations.md) for what this
+phase deliberately did **not** do — remediation, refunds, a findings purge, and
+provider-side orphan discovery among them.
+
 ### Creating the first administrator
 
 Registration always creates a `CUSTOMER`. The first `ADMIN` comes from the
@@ -218,8 +281,9 @@ src/
     users/            # User persistence (service-only, no controller)
     products/         # public catalog, admin writes, stock CAS methods
     cart/             # per-user cart, locked for checkout
-    orders/           # order reads, checkout transaction, cancellation, markPaid
+    orders/           # order reads, checkout transaction, cancellation, expiry, markPaid
     payments/         # intent initiation, provider adapters, signed webhook
+    maintenance/      # lease, runner, scheduler, expiry sweep, purges, reconciliation, admin API
 prisma/
   schema.prisma        # Prisma schema (datasource + generator)
   migrations/          # committed migrations, applied via prisma migrate deploy

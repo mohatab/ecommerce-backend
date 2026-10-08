@@ -110,8 +110,8 @@ export class StripePaymentProvider implements PaymentProvider {
       // Phase 5, spec §7.3. ONLY the documented resource-missing error becomes
       // a not-found; a network failure, a timeout, a 5xx and a rate limit all
       // rethrow unchanged, because "the provider does not have this payment"
-      // and "I could not ask the provider" are different facts and Task 6
-      // turns them into different findings.
+      // and "I could not ask the provider" are different facts, and
+      // reconciliation turns them into different findings.
       //
       // Read from Stripe's documentation, not inferred:
       //   https://docs.stripe.com/error-codes — `resource_missing`: "The ID

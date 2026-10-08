@@ -33,8 +33,8 @@ import { ReconciliationFindingWriter } from './reconciliation-finding.writer';
     MaintenanceRunnerService,
     MaintenanceScheduler,
   ],
-  // The runner is exported for Phase 5's admin trigger (Task 6), which must
-  // reach exactly the same code path as the schedule. The lease is re-exported
+  // The runner is exported for the admin trigger, which reaches exactly the
+  // same code path as the schedule. The lease is re-exported
   // so MaintenanceModule stays the one import a consumer needs.
   exports: [MaintenanceLeaseModule, MaintenanceRunnerService],
 })

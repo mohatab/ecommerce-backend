@@ -1364,7 +1364,15 @@ Task 4's own tests.
     green, with the Phase 4 baselines (325 unit / 249 e2e) **increased**, never
     reduced.
 28. **No Redis, no BullMQ, no caching, no queue, and exactly one new runtime
-    dependency (`@nestjs/schedule`).**
+    dependency (`@nestjs/schedule`).** Amended during implementation: `cron` is
+    also **declared** in `package.json`, pinned to `4.4.0` — the exact version
+    `@nestjs/schedule` itself pins. This adds **zero** packages to
+    `node_modules`, which is what this criterion exists to prevent.
+    `SchedulerRegistry.addCronJob()` is typed in terms of `CronJob` and
+    `@nestjs/schedule` does not re-export it, so the import is unavoidable once
+    the schedule is config-driven rather than decorator-driven (§9.2); leaving
+    it undeclared was the real defect, because a transitive dependency swapping
+    its cron implementation would break the import silently.
 29. `README.md` and `CLAUDE.md` no longer describe Redis/BullMQ as Phase 5; the
     four closed deferred entries are closed **by shipping**, not by deletion; and
     the findings-retention and provider-orphan limitations are added.
