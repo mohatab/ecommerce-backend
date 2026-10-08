@@ -1,12 +1,14 @@
 import { Module } from '@nestjs/common';
 import { OrdersModule } from '../orders/orders.module';
 import { PaymentsModule } from '../payments/payments.module';
+import { AdminMaintenanceController } from './admin-maintenance.controller';
 import { MaintenanceLeaseModule } from './maintenance-lease.module';
 import { MaintenancePurgeService } from './maintenance-purge.service';
 import { MaintenanceRunnerService } from './maintenance-runner.service';
 import { MaintenanceScheduler } from './maintenance.scheduler';
 import { OrderExpiryService } from './order-expiry.service';
 import { PaymentReconciliationService } from './payment-reconciliation.service';
+import { ReconciliationFindingWriter } from './reconciliation-finding.writer';
 
 /**
  * Phase 5.
@@ -22,11 +24,12 @@ import { PaymentReconciliationService } from './payment-reconciliation.service';
  */
 @Module({
   imports: [MaintenanceLeaseModule, OrdersModule, PaymentsModule],
+  controllers: [AdminMaintenanceController],
   providers: [
     OrderExpiryService,
-    // Task 5 and Task 6 replace these bodies, not this wiring.
     MaintenancePurgeService,
     PaymentReconciliationService,
+    ReconciliationFindingWriter,
     MaintenanceRunnerService,
     MaintenanceScheduler,
   ],

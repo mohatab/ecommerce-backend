@@ -19,6 +19,7 @@ interface OrderListItem {
   totalCents: number;
   currency: string;
   cancelledAt: string | null;
+  expiresAt: string | null;
   createdAt: string;
   items: Array<{
     id: string;
@@ -250,6 +251,59 @@ describe('Orders (e2e)', () => {
       lineTotalCents: product.priceCents * 2,
     });
     expect(body).not.toHaveProperty('idempotencyKey');
+  });
+
+  /**
+   * Phase 5, spec §11. SERVER-AUTHORITATIVE: the asserted value is the stored
+   * column, not one recomputed from createdAt at read time, so the client's
+   * countdown and the expiry sweep read one deadline.
+   */
+  it('exposes the stored expiresAt on the detail route', async () => {
+    const category = await createCategory(prisma);
+    const product = await createProduct(prisma, category.id);
+    const expiresAt = new Date(Date.now() + 1_800_000);
+    const order = await createOrder(
+      prisma,
+      userId,
+      [
+        {
+          productId: product.id,
+          productName: product.name,
+          unitPriceCents: product.priceCents,
+          quantity: 1,
+        },
+      ],
+      { expiresAt },
+    );
+
+    const response = await request(app.getHttpServer())
+      .get(`/api/v1/orders/${order.id}`)
+      .set('Authorization', auth())
+      .expect(200);
+
+    expect((response.body as OrderListItem).expiresAt).toBe(
+      expiresAt.toISOString(),
+    );
+  });
+
+  it('reports a null expiresAt for an order that has no deadline', async () => {
+    const category = await createCategory(prisma);
+    const product = await createProduct(prisma, category.id);
+    const order = await createOrder(prisma, userId, [
+      {
+        productId: product.id,
+        productName: product.name,
+        unitPriceCents: product.priceCents,
+        quantity: 1,
+      },
+    ]);
+
+    const response = await request(app.getHttpServer())
+      .get(`/api/v1/orders/${order.id}`)
+      .set('Authorization', auth())
+      .expect(200);
+
+    expect((response.body as OrderListItem).expiresAt).toBeNull();
   });
 
   it('computes lineTotalCents as unitPriceCents times quantity', async () => {

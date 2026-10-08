@@ -30,6 +30,9 @@ describe('OpenAPI document (e2e)', () => {
 
   const INITIATE_PATH = '/api/v1/orders/{id}/payments';
   const WEBHOOK_PATH = '/api/v1/payments/webhook';
+  // Phase 5, spec §10. Two routes, both ADMIN-only.
+  const RUN_JOB_PATH = '/api/v1/admin/maintenance/{job}/run';
+  const FINDINGS_PATH = '/api/v1/admin/reconciliation/findings';
 
   beforeAll(async () => {
     // throttleLimit bypasses ThrottlerGuard: this suite fires a request at the
@@ -60,6 +63,7 @@ describe('OpenAPI document (e2e)', () => {
       expect(operations()).toEqual([
         'DELETE /api/v1/admin/products/{id}',
         'DELETE /api/v1/cart/items/{productId}',
+        'GET /api/v1/admin/reconciliation/findings',
         'GET /api/v1/auth/me',
         'GET /api/v1/cart',
         'GET /api/v1/categories',
@@ -69,6 +73,7 @@ describe('OpenAPI document (e2e)', () => {
         'GET /api/v1/products/{id}',
         'GET /health',
         'PATCH /api/v1/admin/products/{id}',
+        'POST /api/v1/admin/maintenance/{job}/run',
         'POST /api/v1/admin/products',
         'POST /api/v1/admin/products/{id}/stock-adjustments',
         'POST /api/v1/auth/login',
@@ -89,6 +94,24 @@ describe('OpenAPI document (e2e)', () => {
       expect(
         operations().filter((operation) => /payment/i.test(operation)),
       ).toEqual([`POST ${INITIATE_PATH}`, `POST ${WEBHOOK_PATH}`]);
+    });
+
+    it('adds exactly two maintenance routes, and no remediation route', () => {
+      // Phase 5 detects and reports; it never refunds or remediates (D5). A
+      // third admin-maintenance route — a refund, a resolve-this-finding
+      // button, a retry queue — fails here.
+      expect(
+        operations().filter((operation) =>
+          /maintenance|reconciliation/i.test(operation),
+        ),
+      ).toEqual([`GET ${FINDINGS_PATH}`, `POST ${RUN_JOB_PATH}`]);
+    });
+
+    it('templates the job name rather than keeping the Nest `:job` form', () => {
+      expect(Object.keys(document.paths)).toContain(RUN_JOB_PATH);
+      expect(Object.keys(document.paths)).not.toContain(
+        '/api/v1/admin/maintenance/:job/run',
+      );
     });
 
     it('templates the order id rather than keeping the Nest `:id` form', () => {
@@ -137,11 +160,60 @@ describe('OpenAPI document (e2e)', () => {
     });
   });
 
+  describe.each([
+    ['job trigger', RUN_JOB_PATH, 'post', [200, 400, 401, 403, 409, 429]],
+    ['findings list', FINDINGS_PATH, 'get', [200, 400, 401, 403]],
+  ])('%s — spec §10 documentation clause', (_name, path, method, statuses) => {
+    const operation = () => {
+      const item = document.paths[path];
+
+      expect(item).toBeDefined();
+
+      const found = method === 'post' ? item.post : item.get;
+
+      expect(found).toBeDefined();
+
+      return found!;
+    };
+
+    it('carries @ApiTags(admin-maintenance)', () => {
+      expect(operation().tags).toContain('admin-maintenance');
+    });
+
+    it('carries @ApiOperation with a non-empty summary', () => {
+      const { summary } = operation();
+
+      expect(typeof summary).toBe('string');
+      expect(summary?.trim()).not.toBe('');
+    });
+
+    it('documents exactly the expected @ApiResponse status codes', () => {
+      // An exact set. The 200 on the trigger covers both a completed run
+      // and a `status: "skipped"` one (spec §10.2); 409 is the lease-held
+      // case, which is deliberately NOT a 200 with a reason.
+      expect(Object.keys(operation().responses).sort()).toEqual(
+        statuses.map(String).sort(),
+      );
+    });
+  });
+
   describe('documented paths resolve on the real HTTP server', () => {
     it('resolves the initiation route (401, not 404)', async () => {
       // 401 proves the route matched and the global JwtAuthGuard rejected it.
       await request(app.getHttpServer())
         .post('/api/v1/orders/0195f0a0-0000-7000-8000-0000000000ff/payments')
+        .expect(401);
+    });
+
+    it('resolves the job trigger route (401, not 404)', async () => {
+      await request(app.getHttpServer())
+        .post('/api/v1/admin/maintenance/order-expiry/run')
+        .expect(401);
+    });
+
+    it('resolves the findings route (401, not 404)', async () => {
+      await request(app.getHttpServer())
+        .get('/api/v1/admin/reconciliation/findings')
         .expect(401);
     });
 

@@ -47,6 +47,15 @@ export class OrderResponseDto {
   @ApiProperty({ nullable: true, example: null })
   cancelledAt!: Date | null;
 
+  /**
+   * Phase 5, spec §11. SERVER-AUTHORITATIVE: the stored column, never a value
+   * recomputed from `createdAt` at read time, so the client's countdown and
+   * the expiry sweep agree on one deadline. `null` for orders created before
+   * the migration, and for orders whose deadline is no longer meaningful.
+   */
+  @ApiProperty({ nullable: true, example: '2026-10-07T12:30:00.000Z' })
+  expiresAt!: Date | null;
+
   @ApiProperty()
   createdAt!: Date;
 
@@ -58,6 +67,7 @@ export class OrderResponseDto {
     dto.totalCents = order.totalCents;
     dto.currency = order.currency;
     dto.cancelledAt = order.cancelledAt;
+    dto.expiresAt = order.expiresAt;
     dto.createdAt = order.createdAt;
     dto.items = order.items.map((item) => {
       const line = new OrderItemResponseDto();
