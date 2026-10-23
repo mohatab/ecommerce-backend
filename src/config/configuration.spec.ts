@@ -114,4 +114,18 @@ describe('configuration', () => {
 
     expect(() => configuration()).toThrow(/PAYMENT_WEBHOOK_SECRET/);
   });
+
+  it('reads TRUST_PROXY_HOPS as a number', () => {
+    process.env.JWT_SECRET = 'c'.repeat(32);
+    process.env.TRUST_PROXY_HOPS = '2';
+
+    expect(configuration().app.trustProxyHops).toBe(2);
+  });
+
+  it('falls back to 0 when TRUST_PROXY_HOPS is unset', () => {
+    process.env.JWT_SECRET = 'c'.repeat(32);
+    delete process.env.TRUST_PROXY_HOPS;
+
+    expect(configuration().app.trustProxyHops).toBe(0);
+  });
 });

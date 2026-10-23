@@ -68,6 +68,9 @@ describe('createPaymentProvider', () => {
       DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
       JWT_SECRET: 'j'.repeat(32),
       PAYMENT_WEBHOOK_SECRET: 'w'.repeat(20),
+      // Required under production (Phase 6). Without it the 'fake' assertion
+      // above would be rejected for the WRONG reason and pass vacuously.
+      TRUST_PROXY_HOPS: 0,
     };
 
     expect(

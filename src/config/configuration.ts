@@ -2,6 +2,7 @@ export interface AppConfig {
   app: {
     port: number;
     env: string;
+    trustProxyHops: number;
   };
   database: {
     url: string;
@@ -71,6 +72,12 @@ export default (): AppConfig => ({
   app: {
     port: parseInt(process.env.PORT ?? '3000', 10),
     env: process.env.NODE_ENV ?? 'development',
+    // 0, never 1. Joi requires an explicit value under production, so this
+    // fallback is only ever reached outside production (or on a path Joi did
+    // not run - a script importing this factory directly). 0 means "trust
+    // nothing", which is the right default for a direct-to-Node process and
+    // the wrong one behind a proxy - hence the production requirement.
+    trustProxyHops: parseInt(process.env.TRUST_PROXY_HOPS ?? '0', 10),
   },
   database: {
     url: process.env.DATABASE_URL ?? '',

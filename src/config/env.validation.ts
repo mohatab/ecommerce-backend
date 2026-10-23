@@ -23,6 +23,35 @@ export const envValidationSchema = Joi.object({
   PORT: Joi.number().port().default(3000),
   DATABASE_URL: Joi.string().uri().required(),
   CORS_ORIGIN: Joi.string().default('*'),
+  // Phase 6. Express's `trust proxy`, and therefore every throttle bucket:
+  // ThrottlerGuard.getTracker() returns bare `req.ip`, and `req.ip` honours
+  // this setting. One app.set() is the whole mechanism - no custom tracker.
+  //
+  // REQUIRED under production, with no default, because NEITHER default is
+  // safe. 0 behind a proxy makes Express report the PROXY's address for every
+  // request, collapsing all clients into one bucket: the 5/min limit on login
+  // becomes 5/min for the entire internet, and the load balancer's own health
+  // probes share that budget. Anything HIGHER than the real chain depth is a
+  // full bypass, because Express counts past the proxy-appended entries into
+  // attacker-supplied ones. Which failure is worse depends on the topology,
+  // which this code cannot know. So the deployer states it.
+  //
+  // Note the asymmetry for whoever operates this: too LOW degrades
+  // availability loudly (everyone throttled together); too HIGH removes the
+  // control silently. Too high is the dangerous direction.
+  //
+  // The value is the number of proxies that will APPEND to X-Forwarded-For.
+  // 0 for direct-to-Node, 1 for one reverse proxy, 2 for a CDN in front of a
+  // load balancer. There is no universally correct value and 1 is not a
+  // recommendation - it is only the reference topology the tests use.
+  TRUST_PROXY_HOPS: Joi.number()
+    .integer()
+    .min(0)
+    .default(0)
+    .when('NODE_ENV', {
+      is: 'production',
+      then: Joi.number().integer().min(0).required(),
+    }),
   TEST_DATABASE_URL: Joi.string().uri().optional(),
   JWT_SECRET: Joi.string().min(32).required(),
   JWT_ACCESS_TTL: Joi.string().pattern(TTL_PATTERN).default('15m'),
