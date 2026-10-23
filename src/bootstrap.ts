@@ -42,7 +42,7 @@ export function configureApp(app: INestApplication): void {
   app.setGlobalPrefix('api', {
     // Two entries, not one. A route is matched by its FULL path, so `health`
     // does not cover `health/live`: without the second entry the liveness
-    // probe is served at /api/health/live while /health stays unprefixed —
+    // probe is served at /api/health/live while /health stays unprefixed â€”
     // and every liveness test that only checks for a 200 still passes.
     // Infrastructure probes need stable, unprefixed, unversioned paths.
     exclude: [

@@ -94,4 +94,15 @@ describe('auth rate limiting (e2e)', () => {
       await request(app.getHttpServer()).get('/health/live').expect(200);
     }
   });
+
+  // Companion to the test above (spec 17.2, DoD 2). /health costs a database
+  // round trip per call and must STAY throttled; skipping both handlers is the
+  // unauthenticated database-load amplifier spec 6.3 forbids. Buckets are per
+  // class+handler+IP, so this does not share a count with /health/live.
+  it('still rate-limits /health past the global limit', async () => {
+    for (let i = 0; i < 100; i += 1) {
+      await request(app.getHttpServer()).get('/health').expect(200);
+    }
+    await request(app.getHttpServer()).get('/health').expect(429);
+  });
 });

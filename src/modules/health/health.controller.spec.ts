@@ -45,16 +45,24 @@ describe('HealthController', () => {
 
     // C-D3, unit half. The container half lives in T6.
     //
-    // This is the assertion that NAMES the property: liveness must not depend
-    // on the database. Asserting live() returns 200 while the database is UP
-    // proves nothing, because every endpoint returns 200 then.
-    it('still returns ok when the database is unreachable', () => {
+    // Liveness must not depend on the database, and that only shows in the
+    // database-DOWN state: asserting 200 while the database is up proves
+    // nothing, because every endpoint returns 200 then. The result is awaited
+    // through Promise.resolve so a regressed async live() fails an assertion
+    // instead of an unhandled rejection killing the worker.
+    //
+    // Ceiling: this proves live() does not call the injected Prisma mock. It
+    // cannot see other I/O (fs, a sync config read). Zero-I/O is observable
+    // only in T6's container half.
+    it('still returns ok when the database is unreachable', async () => {
       prisma.$queryRaw.mockRejectedValue(new Error('connection refused'));
 
-      expect(controller.live()).toEqual({ status: 'ok' });
+      const result: unknown = controller.live();
+      await expect(Promise.resolve(result)).resolves.toEqual({ status: 'ok' });
       expect(prisma.$queryRaw).not.toHaveBeenCalled();
     });
 
+    // Ceiling: proves "not async", not "no I/O" (a sync fs read would pass).
     it('is synchronous, so it cannot await I/O', () => {
       expect(controller.live()).not.toBeInstanceOf(Promise);
     });

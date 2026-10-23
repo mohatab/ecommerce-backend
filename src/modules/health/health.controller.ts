@@ -30,7 +30,7 @@ export class HealthController {
   /**
    * Liveness: is this process up and able to answer at all.
    *
-   * Deliberately does NO I/O — no database, no provider, no file system — and
+   * Deliberately does NO I/O â€” no database, no provider, no file system â€” and
    * is deliberately SYNCHRONOUS so it cannot grow an `await` by accident.
    *
    * It must never consult the database, and that is not a style preference.
@@ -52,7 +52,7 @@ export class HealthController {
    */
   @Get('live')
   @SkipThrottle()
-  @ApiOperation({ summary: 'Liveness probe — process only, no dependencies' })
+  @ApiOperation({ summary: 'Liveness probe â€” process only, no dependencies' })
   @ApiResponse({ status: 200, description: 'The process is serving' })
   live(): LivenessStatus {
     return { status: 'ok' };
