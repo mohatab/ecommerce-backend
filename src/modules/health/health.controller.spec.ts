@@ -34,4 +34,29 @@ describe('HealthController', () => {
       ServiceUnavailableException,
     );
   });
+
+  describe('live', () => {
+    it('returns ok without touching the database', () => {
+      const result = controller.live();
+
+      expect(result).toEqual({ status: 'ok' });
+      expect(prisma.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    // C-D3, unit half. The container half lives in T6.
+    //
+    // This is the assertion that NAMES the property: liveness must not depend
+    // on the database. Asserting live() returns 200 while the database is UP
+    // proves nothing, because every endpoint returns 200 then.
+    it('still returns ok when the database is unreachable', () => {
+      prisma.$queryRaw.mockRejectedValue(new Error('connection refused'));
+
+      expect(controller.live()).toEqual({ status: 'ok' });
+      expect(prisma.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('is synchronous, so it cannot await I/O', () => {
+      expect(controller.live()).not.toBeInstanceOf(Promise);
+    });
+  });
 });

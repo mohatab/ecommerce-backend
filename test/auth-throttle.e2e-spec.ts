@@ -83,4 +83,15 @@ describe('auth rate limiting (e2e)', () => {
       await orderApp.close();
     }
   });
+
+  // C-D4. The global limit is 100/60s per route handler per IP; /health/live
+  // must survive past it because it is an infrastructure probe, not a client.
+  //
+  // 105 requests: more than the global cap of 100, so an un-skipped handler
+  // 429s before the loop ends.
+  it('does not rate-limit /health/live past the global limit', async () => {
+    for (let i = 0; i < 105; i += 1) {
+      await request(app.getHttpServer()).get('/health/live').expect(200);
+    }
+  });
 });

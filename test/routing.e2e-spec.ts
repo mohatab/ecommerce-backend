@@ -24,6 +24,27 @@ describe('routing and validation (e2e)', () => {
       await request(app.getHttpServer()).get('/api/v1/health').expect(404);
     });
 
+    it('serves /health/live unprefixed and unversioned', async () => {
+      await request(app.getHttpServer())
+        .get('/health/live')
+        .expect(200)
+        .expect({ status: 'ok' });
+    });
+
+    // Review Focus 3. The global-prefix exclude list in src/bootstrap.ts named
+    // only `health`, and a @Get('live') handler produces the ROUTE PATH
+    // `health/live`, which does not match that entry. Without a second
+    // exclude entry this endpoint is served at /api/health/live instead, and
+    // every other liveness assertion in this phase still passes while DoD
+    // item 1's "unprefixed and unversioned" is quietly false.
+    it('does not serve health/live under the versioned prefix', async () => {
+      await request(app.getHttpServer()).get('/api/v1/health/live').expect(404);
+    });
+
+    it('does not serve health/live under the bare prefix', async () => {
+      await request(app.getHttpServer()).get('/api/health/live').expect(404);
+    });
+
     it('serves normal controllers under /api/v1', async () => {
       await request(app.getHttpServer())
         .get('/api/v1/ping')

@@ -40,7 +40,15 @@ export function configureApp(app: INestApplication): void {
   app.enableCors({ origin: configService.get('cors.origin', { infer: true }) });
 
   app.setGlobalPrefix('api', {
-    exclude: [{ path: 'health', method: RequestMethod.GET }],
+    // Two entries, not one. A route is matched by its FULL path, so `health`
+    // does not cover `health/live`: without the second entry the liveness
+    // probe is served at /api/health/live while /health stays unprefixed —
+    // and every liveness test that only checks for a 200 still passes.
+    // Infrastructure probes need stable, unprefixed, unversioned paths.
+    exclude: [
+      { path: 'health', method: RequestMethod.GET },
+      { path: 'health/live', method: RequestMethod.GET },
+    ],
   });
   app.enableVersioning({
     type: VersioningType.URI,
