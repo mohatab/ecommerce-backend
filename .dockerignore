@@ -5,3 +5,10 @@ coverage
 .env.*.local
 .git
 *.log
+
+docs
+test
+.superpowers
+.claude
+.vscode
+*.stackdump
