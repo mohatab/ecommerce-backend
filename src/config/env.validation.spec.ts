@@ -278,11 +278,17 @@ describe('envValidationSchema', () => {
       ).toBeUndefined();
     });
 
-    // Review Focus 2. Express's `trust proxy` accepts a number OR a string.
-    // A non-numeric string reaches proxy-addr and throws (a loud crash); the
-    // genuinely silent case is parseInt yielding NaN, where compileTrust(NaN)
-    // is `i < NaN`, always false: it trusts nothing, with no error and no log.
-    // Either way the value must be refused at boot.
+    // Review Focus 2. `trust proxy` accepts a number, a string or a function,
+    // but this app only ever hands it a NUMBER: configuration.ts reads
+    // TRUST_PROXY_HOPS through parseInt before bootstrap.ts calls
+    // app.set('trust proxy', ...), so proxy-addr never sees the raw string and
+    // its loud throw on a non-numeric one is unreachable on this path.
+    // Measured along the real path instead (express 5.2.1), every value below
+    // fails SILENTLY: 'abc' and '' parseInt to NaN, and compileTrust returns
+    // `i < NaN` - always false, so nothing is trusted, with no error and no
+    // log; -1 compiles to the same always-false function; and 1.5 parseInts to
+    // 1, quietly trusting one hop as though that had been configured. Joi is
+    // the only thing that can refuse them, which is why it must.
     it.each([
       ['a non-numeric string', 'abc'],
       ['a negative count', -1],
