@@ -61,6 +61,7 @@ function validProdEnv(
     PAYMENT_PROVIDER: 'stripe',
     PAYMENT_API_KEY: 'sk_test_example',
     TRUST_PROXY_HOPS: 0,
+    CORS_ORIGIN: 'https://shop.example.test',
     ...overrides,
   });
 }
@@ -277,10 +278,11 @@ describe('envValidationSchema', () => {
       ).toBeUndefined();
     });
 
-    // Review Focus 2. Express's `trust proxy` accepts a number OR a string,
-    // so an unvalidated 'abc' becomes a HOSTNAME MATCHER that trusts nothing
-    // while looking configured - no error, no log, no trust. Each of these
-    // must be refused at boot instead.
+    // Review Focus 2. Express's `trust proxy` accepts a number OR a string.
+    // A non-numeric string reaches proxy-addr and throws (a loud crash); the
+    // genuinely silent case is parseInt yielding NaN, where compileTrust(NaN)
+    // is `i < NaN`, always false: it trusts nothing, with no error and no log.
+    // Either way the value must be refused at boot.
     it.each([
       ['a non-numeric string', 'abc'],
       ['a negative count', -1],
@@ -290,6 +292,43 @@ describe('envValidationSchema', () => {
       expect(
         rejectedKeys(validate(validEnv({ TRUST_PROXY_HOPS: bad })).error),
       ).toContain('TRUST_PROXY_HOPS');
+    });
+  });
+
+  describe('CORS_ORIGIN', () => {
+    it("defaults to '*' outside production", () => {
+      const { error, value } = validate(validEnv());
+
+      expect(error).toBeUndefined();
+      expect(value.CORS_ORIGIN).toBe('*');
+    });
+
+    // C-D7's schema half. The container half is T6.
+    //
+    // The weakest of this phase's three guards, and the spec says so: this
+    // API authenticates with bearer tokens, not cookies, so '*' leaks no
+    // credential by itself and no browser attaches one automatically. What
+    // makes it worth forbidding is the combination with a published admin
+    // surface: a wildcard origin lets ANY origin script admin routes with a
+    // token obtained some other way.
+    it("rejects '*' under NODE_ENV=production", () => {
+      const env = validProdEnv({ CORS_ORIGIN: '*' });
+
+      expect(rejectedKeys(validate(env).error)).toContain('CORS_ORIGIN');
+    });
+
+    it('is required under NODE_ENV=production, with no default', () => {
+      const env = validProdEnv();
+      delete env.CORS_ORIGIN;
+
+      expect(rejectedKeys(validate(env).error)).toContain('CORS_ORIGIN');
+    });
+
+    it('accepts an explicit origin under production', () => {
+      expect(
+        validate(validProdEnv({ CORS_ORIGIN: 'https://shop.example.test' }))
+          .error,
+      ).toBeUndefined();
     });
   });
 

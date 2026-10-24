@@ -13,6 +13,11 @@ RUN npm run build
 FROM node:20-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# Declared, not changed: alpine already defaults to UTC, so this does not move
+# any schedule. It makes "03:00" in the runbook unambiguous and stops a future
+# base image with a different default from silently moving the retention purge
+# (MAINTENANCE_PURGE_CRON=0 0 3 * * *).
+ENV TZ=UTC
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev

@@ -22,7 +22,22 @@ export const envValidationSchema = Joi.object({
     .default('development'),
   PORT: Joi.number().port().default(3000),
   DATABASE_URL: Joi.string().uri().required(),
-  CORS_ORIGIN: Joi.string().default('*'),
+  // Phase 6. '*' is forbidden under production, and this is deliberately the
+  // WEAKEST of the phase's three guards - recorded as such rather than
+  // oversold. Bearer-token auth means a wildcard leaks no credential by
+  // itself and no browser attaches one automatically. What earns the guard is
+  // the combination with an API that has an admin surface: a wildcard origin
+  // lets any origin script those routes with a token obtained some other way.
+  //
+  // Required under production, so the value is always a deliberate choice. If
+  // a deployment genuinely needs a wildcard it must amend the Phase 6 spec,
+  // which is the intended friction.
+  CORS_ORIGIN: Joi.string()
+    .default('*')
+    .when('NODE_ENV', {
+      is: 'production',
+      then: Joi.string().invalid('*').required(),
+    }),
   // Phase 6. Express's `trust proxy`, and therefore every throttle bucket:
   // ThrottlerGuard.getTracker() returns bare `req.ip`, and `req.ip` honours
   // this setting. One app.set() is the whole mechanism - no custom tracker.

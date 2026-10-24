@@ -71,6 +71,8 @@ describe('createPaymentProvider', () => {
       // Required under production (Phase 6). Without it the 'fake' assertion
       // above would be rejected for the WRONG reason and pass vacuously.
       TRUST_PROXY_HOPS: 0,
+      // Also required under production (Phase 6), for the same reason.
+      CORS_ORIGIN: 'https://shop.example.test',
     };
 
     expect(
