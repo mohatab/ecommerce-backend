@@ -42,7 +42,41 @@ ENV NODE_ENV=production
 ENV TZ=UTC
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+# `npm ci --omit=dev` does NOT remove the Prisma CLI, and that is the whole
+# reason this line is not just `npm ci --omit=dev`.
+#
+# `prisma` is declared only in devDependencies, but it is an OPTIONAL PEER
+# dependency of @prisma/client, which IS a production dependency. So
+# package-lock marks node_modules/prisma `devOptional`, not `dev`, and
+# --omit=dev omits only `dev`. Measured in the built image before this line
+# existed: `npx --no-install prisma --version` reported 6.19.3. A
+# devDependency declaration is not an absence guarantee when a production
+# dependency peer-depends on the same package.
+#
+# @prisma/engines goes with it: it carries schema-engine-* (the binary that
+# APPLIES migrations) plus a DUPLICATE query engine. The generated client
+# loads its own copy from node_modules/.prisma/client/, copied in below, so
+# removing this directory takes the migration engine without touching the
+# query path.
+#
+# That generated .so.node MUST REMAIN in the runtime image: it is the binary
+# every Prisma query loads, so the migration-tooling removal must never delete
+# it -- not here, and not from any later instruction in this stage. (Naming it
+# on this line would in fact delete nothing, since the COPY below has not run
+# yet, which is why the rule is "it must remain" rather than "do not add it
+# here".)
+#
+# Chained with && deliberately. A separate RUN would leave the bytes in the
+# previous layer: every absence check would still pass while the image kept
+# shipping the tooling. Measured on this Dockerfile: the npm ci layer itself
+# goes 526MB -> 436MB and the layer count stays 22, so nothing moved to a new
+# layer. Whole image, docker images SIZE: 938MB -> 814MB.
+#
+# This is a TOOLING boundary, not a capability boundary. $executeRaw and
+# $executeRawUnsafe remain on the client and the database role is whatever
+# DATABASE_URL supplies, so nothing here makes schema mutation impossible.
+RUN npm ci --omit=dev \
+  && rm -rf node_modules/prisma node_modules/.bin/prisma node_modules/@prisma/engines
 
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma

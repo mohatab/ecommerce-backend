@@ -132,7 +132,7 @@ Migrations applied by a human from a checkout.
 | **G2** | CI builds the image and stops. | `ci.yml` `docker` job is `docker build -t ecommerce-backend:ci .` and nothing else |
 | **G3** | No trusted-proxy handling of any kind. | `grep 'trust proxy\|trustProxy\|x-forwarded'` over `src/` and `test/` → **zero hits**. `getHttpAdapter` and `NestExpressApplication` are likewise unused |
 | **G4** | `/health` is a single DB-querying endpoint and is itself rate-limited; liveness and readiness are conflated. | `health.controller.ts` runs `` $queryRaw`SELECT 1` `` → 503 on failure. `app.module.ts`'s own comment: *"a load balancer probing faster than ~1.7/s from a single source will start seeing 429s — confirm that is acceptable before deploying behind one."* |
-| **G5** | The `prisma` CLI is absent from the runtime image, so `migrate deploy` cannot run from the shipped artifact. | `package.json`: `prisma` is a devDependency; `Dockerfile` runtime stage runs `npm ci --omit=dev`. Generated client arrives by copying `node_modules/.prisma`, a layout Prisma does not contract |
+| **G5** | **Misdiagnosed in the first draft of this spec, and corrected here — see §9.2.1.** The gap has three parts. **(a)** No migration artifact ships: `migrate deploy` cannot be run from a shipped image because no such image exists. **(b)** The runtime image **does** carry the `prisma` CLI *and* `@prisma/engines` (which holds the schema engine), despite `prisma` being a devDependency — the opposite of what this row originally asserted. **(c)** The generated client arrives by copying `node_modules/.prisma`, a layout Prisma does not contract. | **(a)** `docker-compose.yml` and `ci.yml` never run a migration; no `--target` exists in the Dockerfile. **(b)** Measured in the built image, **not** inferred from `package.json`: `npx --no-install prisma --version` → `6.19.3`, and `node_modules/@prisma/engines/schema-engine-linux-musl-openssl-3.0.x` is present. The original evidence cited here ("`prisma` is a devDependency; the runtime stage runs `npm ci --omit=dev`") was a **deduction from the manifest that the image contradicts** — `prisma` is an optional *peer* of the production `@prisma/client`, so the lockfile marks it `devOptional` and `--omit=dev` keeps it (§9.2.1). **(c)** `Dockerfile`: `COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma` |
 | **G6** | No `HEALTHCHECK`, and the signal path is untested. | `Dockerfile` `CMD ["node", "dist/main"]` → node is PID 1. `configureApp()` does call `app.enableShutdownHooks()`, but **zero tests reference `SIGTERM`, `SIGINT`, or shutdown**: those strings appear only in `src/bootstrap.ts` and a `maintenance.scheduler.ts` comment |
 | **G7** | Swagger is published unconditionally, outside the Nest guard chain. | `main.ts` calls `SwaggerModule.setup('api/docs', …)` with no environment check |
 | **G8** | `CORS_ORIGIN` defaults to `*` with no production override. | `env.validation.ts`: `CORS_ORIGIN: Joi.string().default('*')` — while `PAYMENT_PROVIDER` directly above demonstrates the in-repo pattern for forbidding a value under production |
@@ -442,7 +442,8 @@ source commit.** Each invocation passes `--target`; both resolve the same
 `build` stage, so the shared layers are built once and reused from the cache by
 the second invocation.
 
-- **`runtime`** — contents unchanged, plus `HEALTHCHECK` and `ENV TZ=UTC`.
+- **`runtime`** — plus `HEALTHCHECK`, `ENV TZ=UTC`, and an explicit **prune of
+  the Prisma migration tooling** that `npm ci --omit=dev` leaves behind (§9.2).
 - **`migrate`** — new: `FROM build AS migrate`, with `CMD` running
   `prisma migrate deploy`. Two lines. The `build` stage already carries
   devDependencies, the `prisma` CLI, `prisma/schema.prisma`, and
@@ -467,31 +468,157 @@ serving container is not something an operator or a stray script can do by
 reaching for the documented command. C-D10 asserts that mechanically (§17.3)
 rather than leaving it to prose.
 
-**State this precisely — an earlier draft of this spec overclaimed it, and the
-overclaim is corrected here rather than quietly dropped.**
+#### 9.2.1 The finding that forced this section to be rewritten twice
 
-What C-D10 establishes: **the standard Prisma migration CLI is absent from the
-runtime image**, so `prisma migrate deploy` and its siblings cannot be invoked
-there.
+An earlier draft overclaimed what C-D10 established, and §9.2.4 below is that
+correction. **But the first correction was itself built on a false premise, and
+the premise was disproved by measurement during Task 4.** Both corrections are
+recorded here rather than quietly replaced, because the second one is the more
+instructive.
 
-What C-D10 does **not** establish, and what no part of Phase 6 establishes:
+**`npm ci --omit=dev` does not remove the Prisma CLI from the runtime image.**
+Measured in the built artifact, not inferred from the manifest:
+
+```
+$ docker run --rm --entrypoint sh <runtime> -c 'npx --no-install prisma --version'
+prisma                  : 6.19.3
+$ ls -l node_modules/.bin/prisma
+node_modules/.bin/prisma -> ../prisma/build/index.js
+```
+
+The mechanism, read from package metadata rather than guessed: `prisma` is
+declared **only** in `devDependencies`, but it is an **optional peer dependency of
+`@prisma/client`**, which is a *production* dependency —
+
+```
+@prisma/client@6.19.3  peerDependencies:     { "prisma": "*" }
+                       peerDependenciesMeta: { "prisma": { "optional": true } }
+```
+
+— so `package-lock.json` v3 marks `node_modules/prisma` as **`devOptional: true`**,
+not `dev: true`, and `npm ci --omit=dev` omits only `dev`. The same flag carries
+`@prisma/engines` and `typescript` into the serving image.
+
+**Generalise the lesson, because it is not Prisma-specific: a `devDependencies`
+declaration is not an absence guarantee when a production dependency peer-depends
+on the same package.** Any claim of the form "package X is not in the runtime image
+because it is a devDependency" must be measured in the built image. This project
+asserted the opposite for an entire phase, and four green verification gates did
+not notice.
+
+The scope is worse than the CLI alone. The runtime image also carried
+`@prisma/engines` (35.6 MB), containing
+`schema-engine-linux-musl-openssl-3.0.x` (18.7 MB) — **the binary that actually
+applies migrations** — plus a *duplicate* query engine. The serving image shipped
+both the documented command and the engine behind it.
+
+#### 9.2.2 Approved target state
+
+- The **`migrate`** target retains the Prisma CLI and every engine
+  `prisma migrate deploy` needs. Unchanged by this correction.
+- The **`runtime`** target excludes the Prisma CLI and the migration/schema-engine
+  tooling.
+- **No runtime dependency is added.**
+- **`package.json` and `package-lock.json` are not changed** to work around npm's
+  dependency classification. The classification is *correct* — `prisma` really is
+  an optional peer of the client — so the manifest is not what is wrong; the image
+  is. Moving `prisma` would also change what the `build` stage and local
+  development resolve, for no gain in the serving image.
+- `runtime` stays the **last** stage, so a bare `docker build .` still produces the
+  server.
+- Both targets keep coming from **one Dockerfile and one source commit**.
+
+#### 9.2.3 Removal strategy, and why it preserves the Prisma Client
+
+The removal set was chosen by **inspecting the installed layout**, not by reasoning
+about package names. Measured inside the runtime image:
+
+| Path | Size (`du`; MiB unless stated) | What it is | Verdict |
+|---|---|---|---|
+| `node_modules/prisma` | 50.1 | the CLI | **remove** |
+| `node_modules/.bin/prisma` | symlink | the CLI's entry point | **remove** |
+| `node_modules/@prisma/engines` | 35.6 | `schema-engine-linux-musl-openssl-3.0.x` **plus a duplicate query engine** | **remove** |
+| `node_modules/.prisma/client/libquery_engine-linux-musl-openssl-3.0.x.so.node` | 16.7 | **the query engine the generated client actually loads** | **KEEP — deleting it breaks every query** |
+| `node_modules/@prisma/client` | 73.7 | the client runtime | keep |
+| `@prisma/get-platform`, `@prisma/fetch-engine`, `@prisma/config`, `@prisma/debug`, `@prisma/engines-version` | ~2.5 MB total | CLI support packages | **keep** — see below |
+| `typescript` | ~22 MB | the other `devOptional` passenger (§9.2.1) | **keep — out of scope.** It is not migration tooling, so removing it is not this boundary's business. Recorded so the omission is deliberate rather than overlooked; a size-driven prune is a separate change with its own verification |
+
+**The decisive layout fact:** the generated client at `node_modules/.prisma/client/`
+carries **its own copy** of `libquery_engine-linux-musl-openssl-3.0.x.so.node`.
+The copy inside `@prisma/engines` is a *second* one that the client does not load.
+That is precisely why removing `@prisma/engines` takes the schema engine away
+without touching the query path — and it is the only reason the removal is narrow
+enough to be safe.
+
+**The ~2.5 MB of small `@prisma/*` support packages are deliberately NOT removed.**
+They are not migration tooling: `engines-version` is a version constant, and
+`get-platform` resolves the binary target and is reachable from the client's own
+runtime. Deleting them would trade a measurable risk to the query path for an
+unmeasurable size win. **Narrow removal is the design, not a compromise** — every
+path in the remove column is either the CLI or the schema engine.
+
+**The prune must be chained into the same `RUN` as `npm ci --omit=dev`**, never
+added as a later `RUN`. A separate layer leaves the bytes in the image's layer
+history: the final filesystem would lack them, but the image would still carry and
+transfer them, and the reclaimed-size claim would be false. Chaining makes the
+deletion real rather than cosmetic.
+
+**Verification is a real database query, not a module load.** Proven in a
+throwaway container before this section was written: with all three paths removed,
+a raw `SELECT 1` **and** two model queries (`user.count()`, `category.count()`)
+all succeed against a real PostgreSQL instance, and the only engine binary left in
+the image is the generated client's own. `new PrismaClient()` instantiating is
+**not** sufficient evidence — it does not load the engine, so it would pass even
+against a broken removal set.
+
+Reclaimed, with the instrument named: the remove column sums to **85.7 MiB**
+measured by `du` inside `node_modules` (50.1 + 35.6 MiB in the table above), which
+is **≈ 90 MB** in decimal units. That is a *disk-usage* figure for the deleted
+paths — it is **not** an image-size prediction and **not** a Docker layer delta.
+The three are different instruments measuring different things and must not be
+quoted interchangeably; Task 4a measured the other two directly (`docker images`
+SIZE **938 MB → 814 MB**, and the `npm ci` layer in `docker history`
+**526 MB → 436 MB**) — both recorded in the `Dockerfile`'s own comment above the
+pruning `RUN`. §9.3 reports the image pair (938 MB → 814 MB) and the 124 MB
+difference, names the `du` figure only to distinguish it, and defers here for the
+measurements themselves — so the two sections no longer state one number in two
+units.
+
+Expect the three to differ, and not in a direction either of them predicts: the
+`du` figure and the `npm ci` layer delta happen to agree here (≈ 90 MB each),
+while the whole-image SIZE delta is **larger** at 124 MB. `docker images` SIZE is
+a derived snapshot measurement, not a per-layer one, so the 124 MB is quoted as an
+observation and is **not** derived from the other two.
+
+#### 9.2.4 State the claim precisely
+
+What this establishes: **the standard Prisma migration CLI and the schema engine
+are absent from the runtime image**, so `prisma migrate deploy` and its siblings
+cannot be invoked there — not by an operator, and not by a stray script reaching
+for the documented command.
+
+What it does **not** establish, and what no part of Phase 6 establishes:
 
 - It does not prove schema mutation is *impossible*. `PrismaService` extends
   `PrismaClient`, which exposes `$executeRaw` and `$executeRawUnsafe` (both present
   on the generated client, verified). Application code issuing DDL through either
   would alter the schema with no CLI involved. Today it does not: the only raw SQL
-  anywhere in `src/` is the health check's `` $queryRaw`SELECT 1` ``, and there is
-  no DDL. So this is a **latent capability, not an exercised one** — which is a
-  reason the gap is acceptable, and not a reason to claim it is closed.
+  anywhere in `src/` is the health check's bare `SELECT 1`, and there is no DDL. So
+  this is a **latent capability, not an exercised one** — which is a reason the gap
+  is acceptable, and not a reason to claim it is closed.
 - It does not constrain database permissions. The connection string in
   `DATABASE_URL` is whatever the deployment supplies; if that role may run `ALTER
   TABLE`, it may run it from the serving process.
+- **`prisma/schema.prisma` and `prisma/migrations` remain copied into the runtime
+  image.** They are *data, not tooling*, and removing them is out of scope — but it
+  means the migration SQL is readable there even though nothing in the image can
+  apply it. Recorded in §19.3 rather than left implicit.
 
 So this is a **tooling boundary, not a capability boundary** — weaker than Phase
 4's `PaymentProvider` taking no `Prisma.TransactionClient`, where the *type system*
 makes the unwanted call unrepresentable. Nothing here is enforced by the compiler
-or by the database. Do not describe it as if it were, and do not cite it as
-Phase 4's equivalent.
+or by the database. Do not describe it as if it were, and do not cite it as Phase
+4's equivalent.
 
 What would make it a real capability boundary is a least-privilege database role
 for the application, distinct from the role that runs migrations. **That is
@@ -500,13 +627,25 @@ administration decision needing a migration story for existing deployments, and
 inventing one here with no real host to apply it to would be exactly the unrun
 configuration this phase exists to eliminate.
 
-**The separate-stage design stands on its other reason, which is unaffected:** it
-removes the hazard of a migration applied from a *different checkout* than the
-running image. The two drift, and nothing detects it. Two `--target` builds from
-one Dockerfile and one commit (§9.1) remove that class of error entirely, and that
-argument needs no claim about what the serving container is capable of.
+**The separate-stage design stands on its other reason, which none of this
+touches:** it removes the hazard of a migration applied from a *different checkout*
+than the running image. The two drift, and nothing detects it. Two `--target`
+builds from one Dockerfile and one commit (§9.1) remove that class of error
+entirely, and that argument needs no claim about what the serving container is
+capable of. **It survived the premise being disproved — which is exactly why the
+design did not have to change when C-D10 did.**
 
 ### 9.3 Honest costs
+
+**Measured sizes: `runtime` 938 MB before the prune, 814 MB after it, and
+`migrate` 1.28 GB.** The prune's measured effect on the serving image is a
+**124 MB** reduction by `docker images` SIZE; the 85.7 MiB that `du` reports for
+the removed paths is a different instrument and never an image-size claim (§9.2.3
+holds these measurements and the warning against mixing them). Neither image is
+small, and **no document produced by this phase may describe the serving image as
+slim or minimal** — `@prisma/client` alone and the generated query engine account
+for 73.7 and 16.7 by the same `du` measurement as §9.2.3's table, so the floor is
+high regardless of what is pruned.
 
 The `migrate` image inherits the full build stage: all source, all
 devDependencies. It is fat. Acceptable for an image that never serves traffic and
@@ -864,7 +1003,7 @@ it and adds no exception.
 | `TRUST_PROXY_HOPS` required under production (§5) | Closes the documented rate-limiting gap — the phase's one real security fix |
 | Swagger not served under production (§8) | The admin surface, including the maintenance trigger, is no longer published by a production container |
 | `CORS_ORIGIN='*'` forbidden under production (§7.3) | Narrows G7's residue; explicitly the weakest of the three |
-| No `prisma` CLI in the runtime image (§9.2) | The standard Prisma migration CLI is absent from the serving image, asserted by C-D10 rather than stated. A **tooling boundary, not a capability boundary**: it does not prove schema mutation is impossible, because `$executeRaw`/`$executeRawUnsafe` remain available and the database role is whatever `DATABASE_URL` supplies (§9.2) |
+| No Prisma CLI and no schema engine in the runtime image (§9.2) | `npm ci --omit=dev` **does not achieve this on its own** — `prisma` is an optional peer of the production `@prisma/client`, so it ships as `devOptional` (§9.2.1). The runtime stage therefore prunes `node_modules/prisma`, `node_modules/.bin/prisma` and `node_modules/@prisma/engines` (which holds the schema engine), chained into the `npm ci` layer. Asserted by C-D10 in both directions rather than stated. A **tooling boundary, not a capability boundary**: it does not prove schema mutation is impossible, because `$executeRaw`/`$executeRawUnsafe` remain available and the database role is whatever `DATABASE_URL` supplies (§9.2.4) |
 | `.dockerignore` gains `docs/`, `test/`, `.superpowers/`, `.claude/` | The **gitignored** SDD ledger stops landing in the build layer (G9) |
 | Postgres unpublished on the CI smoke network (§12.2) | The one network boundary this phase actually verifies rather than documents |
 
@@ -963,7 +1102,7 @@ authority over any deployment (§5.2).
 | **C-D7** | Image boots under production with `CORS_ORIGIN='*'` → **non-zero exit** | The wildcard guard | dropping `.invalid('*')` → boots |
 | **C-D8** | `GET /api/docs` under production → not served | The admin surface is not published | removing the gate → 200 |
 | **C-D9** | `docker stop` → **exit 0 within 10s** | SIGTERM is **handled**, not survived | removing `enableShutdownHooks()` → SIGKILL, exit 137. *Asserting only "it stopped" passes against no handler at all* |
-| **C-D10** | The standard Prisma migration CLI is **absent** from the runtime image — `prisma` does not resolve as an executable there | The serving image carries **no migration tooling**. Scope is exactly that: **not** that schema mutation is impossible (§9.2) | promoting `prisma` to a production dependency → the CLI resolves and the tooling boundary is gone |
+| **C-D10** | Five assertions, all against **built images**, none relying on `npx` output alone. **(a) Runtime, by filesystem:** `node_modules/prisma`, `node_modules/.bin/prisma` and `node_modules/@prisma/engines` are absent, and a `find` across `node_modules` for `schema-engine*` returns nothing. **(b) Runtime, by invocation:** the standard CLI cannot be invoked. **(c1) Runtime, Prisma in isolation:** a direct query through the generated client inside the pruned image — a raw `SELECT 1` **plus** at least two model queries — succeeds against real PostgreSQL. Never `new PrismaClient()` alone, which does not load the engine. **(c2) Runtime, end to end:** the image **serves** `/health` 200, which executes that query through the application. Both, because c1 is the discriminator that separates a Prisma regression from a configuration failure, and c1 is the assertion the mutations pivot on. **(d) Migrate, the converse:** the CLI resolves there, and `prisma migrate deploy` applies all five migrations to a **fresh** database with exit 0 | The intended artifact boundary holds in **both** directions: the migrator can migrate, the server cannot, and the server still works. Scope is exactly that: **not** that schema mutation is impossible (§9.2.4) | **(i)** drop the prune from the runtime `RUN` → (a) and (b) fail on the paths they name while (c1) still passes, which is why the works-anyway assertions alone are never evidence of the boundary; **(ii)** also delete the generated client's own `libquery_engine-…so.node` → (c1) fails on a real query while (a) and (b) still pass, which is why the prune cannot be widened without c1 noticing; **(iii)** promoting `prisma` to a production dependency, **on its own, changes nothing** — the chained `rm -rf` deletes it regardless, so (a) and (b) still pass. That is the point of pruning rather than relying on npm's classification, and it is why the pre-amendment version of this mutation is **withdrawn rather than retained**: it tested a dependency on classification that no longer exists |
 | **C-D11** | Docker's own health status reaches **`healthy`** within a bounded poll; the configured command **runs successfully inside the final runtime image**; and the configured endpoint is **`/health/live`** (§10.5) | The `HEALTHCHECK` *works*, as distinct from existing. Covers both halves: Docker can execute the command, and it targets the endpoint §6.5 assigns | point the check at a command absent from the image (e.g. `curl`) → status stays `unhealthy` and the in-container execution fails. Point it at `/health` → the endpoint assertion fails **while the status assertion still passes**, which is exactly why the endpoint is asserted separately. *Asserting only that the Dockerfile contains a `HEALTHCHECK` line passes against every one of these mutations* |
 
 C-D5 through C-D7 share a shape worth naming: each proves that a guard already
@@ -985,16 +1124,23 @@ and the standing constraint is unchanged.
 
 ## 18. Task boundaries and dependencies
 
-Seven tasks, the same shape as Phase 5. T6 is the phase's centre of gravity.
+Seven tasks plus **T4a**, added after Task 4 measured C-D10's premise false
+(§9.2.1). T6 is the phase's centre of gravity.
+
+**G5's three parts have three different owners:** (a) closed by T4's `migrate`
+stage, (b) closed by T4a's prune, (c) **not closed** — it stays a deferred
+limitation (§19.3 item 2) whose stakes T4a raises, because the prune depends on
+that uncontracted layout.
 
 | # | Task | Depends on | Touches | Closes |
 |---|---|---|---|---|
 | **T1** | `/health/live` + probe semantics | — | `health.controller.ts`, its spec, `app.e2e-spec.ts`/`routing.e2e-spec.ts` | G4 |
 | **T2** | Trusted proxy: `TRUST_PROXY_HOPS`, Joi, `configureApp()`, `.env.example`, C-D1/C-D2 | — | `env.validation.ts`, `configuration.ts`, `bootstrap.ts`, `.env.example`, e2e | **G3**, deferred entry #1 |
 | **T3** | Production guards: Swagger gate, CORS wildcard, `TZ`, boot topology log | **T2** (shares `env.validation.ts`, `configuration.ts`, `.env.example`) | `main.ts`, `env.validation.ts`, `configuration.ts`, `Dockerfile` | G7, G8, G11 |
-| **T4** | Dockerfile: `migrate` stage, `HEALTHCHECK`, `.dockerignore` | — | `Dockerfile`, `.dockerignore` | G5 (second half), G9 |
-| **T5** | Compose `app` + `migrate` services | **T4** | `docker-compose.yml` | local reproducibility |
-| **T6** | **CI smoke job**: build → migrate → run → health-verify → probe → stop, with C-D5…C-D11 | **T1, T2, T3, T4** | `.github/workflows/ci.yml` | **G1, G2, G6**, deferred entry #2 |
+| **T4** | Dockerfile: `migrate` stage, `HEALTHCHECK`, `.dockerignore` | — | `Dockerfile`, `.dockerignore` | **G5(a)**, G9 |
+| **T4a** | Prune the Prisma CLI and schema engine from the runtime stage (C-D10 correction) | **T4** (same file, same stage) | `Dockerfile` (runtime stage `RUN`) | **G5(b)** |
+| **T5** | Compose `app` + `migrate` services | **T4a** | `docker-compose.yml` | local reproducibility |
+| **T6** | **CI smoke job**: build → migrate → run → health-verify → probe → stop, with C-D5…C-D11 | **T1, T2, T3, T4, T4a** | `.github/workflows/ci.yml` | **G1, G2, G6**, deferred entry #2 |
 | **T7** | Docs: release runbook, `deferred-limitations.md`, `CLAUDE.md`, README | **T1–T6** | `README.md`, `docs/deferred-limitations.md`, `CLAUDE.md` | `README.md:32` |
 
 ### 18.1 Ordering notes
@@ -1004,7 +1150,7 @@ Seven tasks, the same shape as Phase 5. T6 is the phase's centre of gravity.
   concurrently guarantees a conflict in the one file where a merge error is a
   security bug.
 - **T1, T2, T4 are mutually independent** and may proceed in any order.
-- **T6 depends on all of T1–T4** because it asserts their behaviour in the
+- **T6 depends on all of T1–T4 and T4a** because it asserts their behaviour in the
   container. Attempting it earlier produces a job asserting things that do not yet
   exist.
 - **T7 last**, because it records measured numbers. Writing it earlier means
@@ -1059,10 +1205,17 @@ behaviour.
    not a universal value** (§5.2), and that **too high is the dangerous direction**.
 2. *"The runtime image's Prisma setup is undeclared and untested"* —
    `Owner: Phase 6`. Closed **in part**, and the entry must say which part. Closed:
-   CI now runs the image, and the migration path ships as an artifact. **Still
-   open:** the runtime stage still copies the generated client via the
-   non-contract `node_modules/.prisma` layout. The remainder keeps its own entry
-   with the trigger *a Prisma major upgrade*.
+   CI now runs the image, the migration path ships as an artifact, and the serving
+   image's Prisma tooling is now *declared and asserted* rather than assumed — the
+   CLI and the schema engine are pruned (§9.2.3) and C-D10 (§17.3) proves it in
+   both directions. **Still open:** the runtime stage still copies the generated client
+   via the non-contract `node_modules/.prisma` layout — and the prune now
+   **depends** on that layout, since the generated client's own copy of the query
+   engine is what survives when `@prisma/engines` is removed. That *raises the
+   stakes* of this deferred item without changing its trigger (*a Prisma major
+   upgrade*): an upgrade that relocates the generated engine would break the
+   serving image's query path, not merely its tidiness. The entry must record that
+   dependency explicitly.
 
 **Sharpened, not closed:**
 
@@ -1083,7 +1236,9 @@ behaviour.
 7. **No request logging exists**, so `TRUST_PROXY_HOPS` is verifiable only through
    throttling behaviour (§5.5). A misconfigured hop count has no direct log signal.
 8. **The serving image's lack of migration tooling is a tooling boundary, not a
-   capability boundary.** C-D10 proves the standard Prisma migration CLI is absent.
+   capability boundary.** C-D10 proves the standard Prisma migration CLI and the
+   schema engine are absent — and, just as importantly, that `npm ci --omit=dev`
+   alone did **not** make them so (§9.2.1).
    It does **not** prove schema mutation is impossible: `$executeRaw` and
    `$executeRawUnsafe` remain on the client (unused for DDL today — the only raw
    SQL in `src/` is the health check's `SELECT 1`), and the database role is
@@ -1091,6 +1246,17 @@ behaviour.
    role distinct from the migration role, which is a database administration
    decision with a migration story for existing deployments. **Trigger:** a real
    deployment exists whose database credentials this project controls.
+
+9. **The runtime image still carries the migration SQL it cannot apply.**
+   `COPY prisma ./prisma` puts `schema.prisma` and all five migration directories
+   into the serving image. They are *data, not tooling* — nothing in the pruned
+   image can execute them (§9.2.4) — but the schema and its history are readable
+   from a serving container, and they inflate it for no purpose the generated
+   client needs (it resolves its own schema copy under
+   `node_modules/.prisma/client/`). Removing them is a separate change with its own
+   verification, deliberately **not** bundled into the tooling prune.
+   **Trigger:** a measured need to shrink the serving image, or a deployment whose
+   threat model objects to the schema being readable in the container.
 
 ---
 
@@ -1121,10 +1287,16 @@ Each item is a pass/fail check, not a judgement.
 10. C-D5, C-D6, C-D7 — three boot aborts in the **image**, each non-zero with its
     named message.
 11. C-D8 — `/api/docs` not served under production.
-12. C-D10 — the standard Prisma migration CLI is absent from the runtime image.
-    The claim recorded is the **tooling boundary only**; no document produced by
-    this phase may state that schema mutation from a serving container is
-    impossible (§9.2).
+12. C-D10 — all **five** assertions of §17.3 pass — (a), (b), (c1), (c2), (d),
+    and **c1 may not be skipped in favour of c2**: the standard Prisma migration CLI
+    **and** the schema engine are absent from the runtime image, achieved by an
+    **explicit prune** because `npm ci --omit=dev` does not achieve it (§9.2.1);
+    the `migrate` image applies all five migrations to a **fresh** database with
+    exit 0; and the pruned runtime image **still serves a real database-backed
+    request**. Asserted against built images, never from `npx` output alone. The
+    claim recorded is the **tooling boundary only**; no document produced by this
+    phase may state that schema mutation from a serving container is impossible
+    (§9.2.4).
 13. C-D11 — the `HEALTHCHECK` verified at runtime per §10.5: Docker's health status
     observed reaching `healthy` under **bounded polling** (a timeout is a failure,
     not a skip), the configured command **executed successfully inside the final
@@ -1179,7 +1351,9 @@ Each item is a pass/fail check, not a judgement.
 25. `lint:ci` clean, `build` clean, unit **≥ 33 suites / 430**, e2e **≥ 28 suites /
     337**, OpenAPI **21/21** — all green, new tests included.
 26. `deferred-limitations.md`: entries 1 and 2 of §19.3 closed by shipping with
-    their stated caveats, entry 3 sharpened, entries 4–8 added. **No entry deleted.**
+    their stated caveats, entry 3 sharpened, entries 4–**9** added (**six** new
+    entries — item 9, the migration SQL that stays in the serving image, arrived
+    with the §9.2 amendment). **No entry deleted.**
 27. `README.md:32` checked off, with a release runbook covering §9.4's order,
     §6.5's probe assignment, §5.2's hop-count rule, and §13.4's shutdown caveats.
 28. `CLAUDE.md` gains a Phase 6 section recording the non-obvious rules: the hop
