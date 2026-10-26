@@ -20,7 +20,7 @@ A production-grade e-commerce backend, built as a portfolio project to demonstra
 
 ## Project Status
 
-This project is being built incrementally, phase by phase. Current phase: **Deployment (Phase 6)**.
+This project is being built incrementally, phase by phase. Latest phase: **Deployment (Phase 6)**.
 
 - ✅ Project structure, config validation, Prisma wiring, health check, Swagger, Docker (Postgres)
 - ✅ Foundation: `/api/v1` versioning, pagination primitives, Prisma error mapping, e2e harness, CI
@@ -29,7 +29,7 @@ This project is being built incrementally, phase by phase. Current phase: **Depl
 - ✅ Cart & orders: transactional checkout, atomic stock decrement, idempotent order creation, cancellation with exactly-once stock restore
 - ✅ Payments: provider-abstracted intent creation, idempotent initiation, signature-verified webhook as the only path to `PAID`
 - ✅ Scheduled maintenance: order expiry releasing stock exactly once, retention purges for `refresh_tokens` and `payment_events`, payment reconciliation (detection only), an admin trigger and findings API — all under a fenced database lease, with no new infrastructure
-- ⬜ Deployment: container smoke test, trusted-proxy configuration, release/migration process
+- ✅ Deployment: a CI job that runs the real image — migrate, serve, report healthy, stop clean — plus a liveness probe, a required trusted-proxy hop count, production config guards, and a migration image built from the same Dockerfile and commit
 
 **Redis and BullMQ are not on this list, and that is a decision rather than a gap.**
 A delayed job is a single point of loss — if the broker drops it, nothing re-derives
@@ -264,6 +264,132 @@ from the environment.
 | `npm run test:e2e`       | Run end-to-end tests                 |
 | `npm run prisma:generate`| Regenerate the Prisma client         |
 | `npm run prisma:migrate` | Create/apply a local dev migration   |
+
+## Deployment
+
+Phase 6's topology is a **single instance**: one API process, in-memory rate-limit
+buckets, and the in-process maintenance scheduler. That is the shape everything
+below assumes, and the shape the tests assert.
+
+Running more than one replica is not wrong, but two things change, and both are on
+record rather than discovered later: the rate-limit buckets stop being shared, so
+the 5/min login limit becomes **5N/min** across `N` replicas — see
+[`docs/deferred-limitations.md`](docs/deferred-limitations.md) for the Redis-storage
+trigger and the fail-open/fail-closed decision it forces — and the maintenance
+lease starts having real contenders, which is the case it was built for.
+
+### Deployment environment variables
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `TRUST_PROXY_HOPS` | **required under `NODE_ENV=production`**, no default; defaults to `0` elsewhere | The number of reverse proxies that will **append** to `X-Forwarded-For`. Governs `req.ip` and therefore every rate-limit bucket. Set it to match **your** topology: `0` direct-to-Node, `1` one reverse proxy, `2` a CDN in front of a load balancer. **There is no universally correct value, and none of these is a recommendation.** Too low collapses every client into one bucket — the 5/min login limit becomes 5/min for the whole internet. **Too high is worse and silent:** Express counts past the proxy-appended entries into attacker-supplied ones, and the limit is bypassed with no error and no log line |
+| `CORS_ORIGIN` | `*` outside production; **required under production, where `*` is rejected** | The exact origin permitted to call this API. Boot aborts under production if it is missing or `*` |
+
+`1` appears above as one option among `0` and `2`, and it is the **reference
+topology the tests use** — it is not a default, a fallback, or a recommendation.
+There is no production default at all: the deployer states the topology.
+
+`.env.example` ships `TRUST_PROXY_HOPS=0`, which is correct for local development
+(`NODE_ENV=development`, direct-to-Node, no proxy).
+
+### Release
+
+Migrations are a **discrete release command** and never run at application boot.
+The migrator and the server are two `--target` builds of one Dockerfile at one
+commit, which is what stops a migration being applied from a different checkout
+than the running image.
+
+```bash
+# 1. Build both targets from the same commit
+docker build --target migrate -t ecommerce-backend:migrate .
+docker build --target runtime -t ecommerce-backend:runtime .
+
+# 2. Apply migrations. This MUST exit 0 before step 3.
+docker run --rm -e DATABASE_URL="$DATABASE_URL" ecommerce-backend:migrate
+
+# 3. Serve
+docker run -d -p 3000:3000 \
+  -e DATABASE_URL="$DATABASE_URL" \
+  -e JWT_SECRET="$JWT_SECRET" \
+  -e PAYMENT_PROVIDER=stripe -e PAYMENT_API_KEY="$PAYMENT_API_KEY" \
+  -e PAYMENT_WEBHOOK_SECRET="$PAYMENT_WEBHOOK_SECRET" \
+  -e CORS_ORIGIN="https://your-origin.example" \
+  -e TRUST_PROXY_HOPS=<the number of proxies in YOUR chain> \
+  ecommerce-backend:runtime
+```
+
+A bare `docker build .` with no `--target` still produces the **server**, because
+`runtime` is the last stage. CI asserts that, so reordering the stages fails loudly
+rather than silently shipping a migration container as the app.
+
+**Locally**, the same two steps through Compose:
+
+```bash
+docker compose up -d postgres
+docker compose run --rm migrate      # must exit 0 before the next line
+docker compose up -d app
+```
+
+**Run those three in order, and do not substitute a bare `docker compose up -d`.**
+`app` and `migrate` both wait only on `postgres` being healthy, not on each other,
+so starting everything at once races the migrator against the server: the app comes
+up, reports **healthy** — `/health/live` touches no database — and every domain
+route 500s against an unmigrated schema. Compose cannot express "migrations
+finished" here, which is why the ordering is manual and why step 2 must exit 0
+before step 3.
+
+### Probes
+
+Point container liveness and the Docker `HEALTHCHECK` at **`/health/live`** —
+process only, no database, not rate-limited. Point a **readiness** probe at
+**`/health`**, which executes `SELECT 1` through Prisma and returns **503** when the
+database is unreachable.
+
+**Do not point liveness at `/health`.** `PrismaService` exits the process when it
+cannot connect, so a restart cannot succeed while the database is down, and the
+restart prevents the reconnection that would otherwise have happened on its own
+through Prisma's pool. A transient outage becomes an unbootable crash loop. CI
+proves the split by stopping Postgres: `/health/live` stays **200** while `/health`
+goes **503**, and `/health` recovers to **200** without a restart.
+
+`/health` stays rate-limited and `/health/live` does not. `/health` costs a database
+round trip and is public, so un-throttling it would build an unauthenticated load
+amplifier; `/health/live` costs nothing. A probe polling faster than ~1.7/s should
+therefore use `/health/live`.
+
+### Shutdown
+
+`SIGTERM` is handled and the process exits **0**; CI asserts that within 10s on an
+idle container. Two caveats, both recorded as deferred limitations:
+
+- **In-flight HTTP requests are not proven to drain under load.** The assertion is
+  made against an idle container.
+- A container stopped **mid-sweep** may be killed before the maintenance runner's
+  `finally` releases its lease, which then stays held until it lapses — up to
+  `MAINTENANCE_LEASE_SECONDS` (default 300s), during which that job reports
+  `skipped: lease-held`. This is safe: a lapsed lease is exactly the recovery path
+  designed for a crashed holder.
+
+### Time
+
+The image pins `TZ=UTC`, so `MAINTENANCE_PURGE_CRON=0 0 3 * * *` means **03:00
+UTC**. Alpine already defaults to UTC; the declaration is there so a future base
+image with a different default cannot silently move the retention purge.
+
+### Network boundary
+
+**The database must not be reachable from the internet.** Development Compose
+publishes `5432` for convenience, which is correct for development and **not a
+deployment template**. The CI smoke job demonstrates the isolated shape: Postgres
+runs on a user-defined Docker network with **no published port at all**, and the
+application container reaches it by name.
+
+### What the API docs do under production
+
+`/api/docs` is **not served** when `NODE_ENV=production`, and CI asserts the 404
+against the real image. `SwaggerModule.setup()` installs Express middleware outside
+the Nest guard chain, so an ungated production container would publish the entire
+API surface — including every admin route — with no authentication in front of it.
 
 ## Project Structure
 

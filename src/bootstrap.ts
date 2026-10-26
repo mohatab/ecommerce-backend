@@ -6,6 +6,7 @@ import {
   VersioningType,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { Application } from 'express';
 import helmet from 'helmet';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { AppConfig } from './config/configuration';
@@ -36,11 +37,44 @@ export const NEST_APP_OPTIONS: NestApplicationOptions = { rawBody: true };
 export function configureApp(app: INestApplication): void {
   const configService = app.get(ConfigService<AppConfig, true>);
 
+  // Trusted proxy, and therefore every throttle bucket: ThrottlerGuard's
+  // getTracker() returns bare `req.ip`, and Express's `req.ip` honours this.
+  // No custom tracker, no guard subclass.
+  //
+  // A NUMBER, never `true`. `true` makes Express take the LEFTMOST
+  // X-Forwarded-For entry, which is entirely attacker-supplied - the 5/min
+  // limit on login would become unlimited, since rotating the header mints a
+  // fresh bucket per request. A numeric N counts from the RIGHT, skipping
+  // exactly as many entries as there are proxies that will append.
+  //
+  // It lives here, in configureApp(), and not in main.ts, because this is the
+  // configuration seam the e2e harness also calls. Setting it in main.ts would
+  // make the production path and the tested path diverge, and the C-D1/C-D2
+  // controls in test/trust-proxy.e2e-spec.ts would be asserting against a
+  // different app than the one that ships.
+  //
+  // getHttpAdapter().getInstance() keeps this function's INestApplication
+  // signature; `set` is an Express method.
+  // The cast narrows the adapter's untyped (`any`) instance; the Express
+  // platform is fixed by NestFactory.create in main.ts and the e2e harness.
+  (app.getHttpAdapter().getInstance() as Application).set(
+    'trust proxy',
+    configService.get('app.trustProxyHops', { infer: true }),
+  );
+
   app.use(helmet());
   app.enableCors({ origin: configService.get('cors.origin', { infer: true }) });
 
   app.setGlobalPrefix('api', {
-    exclude: [{ path: 'health', method: RequestMethod.GET }],
+    // Two entries, not one. A route is matched by its FULL path, so `health`
+    // does not cover `health/live`: without the second entry the liveness
+    // probe is served at /api/health/live while /health stays unprefixed —
+    // and every liveness test that only checks for a 200 still passes.
+    // Infrastructure probes need stable, unprefixed, unversioned paths.
+    exclude: [
+      { path: 'health', method: RequestMethod.GET },
+      { path: 'health/live', method: RequestMethod.GET },
+    ],
   });
   app.enableVersioning({
     type: VersioningType.URI,

@@ -39,8 +39,13 @@ import { RolesGuard } from './modules/auth/guards/roles.guard';
     // ROUTE HANDLER per IP, not 100 across the API. Aggregate exposure is
     // therefore 100 x the number of routes. /health carries this cap too, so
     // a load balancer probing faster than ~1.7/s from a single source will
-    // start seeing 429s — confirm that is acceptable before deploying behind
-    // one.
+    // start seeing 429s.
+    //
+    // Phase 6 answers that rather than leaving it as a warning: /health/live
+    // is @SkipThrottle()d and is the endpoint probes should use. /health stays
+    // capped deliberately — it costs a database round trip and is public, so
+    // un-throttling it would build an unauthenticated load amplifier. Do not
+    // skip the throttle on both.
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
     // In-process cron (Phase 5, spec section 9.1). No queue, no broker: the
     // scheduler lives in the API process and mutual exclusion across replicas

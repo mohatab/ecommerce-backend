@@ -24,4 +24,11 @@ describe('HealthController (e2e)', () => {
         expect(typeof body.timestamp).toBe('string');
       });
   });
+
+  it('/health/live (GET) reports ok', () => {
+    return request(app.getHttpServer())
+      .get('/health/live')
+      .expect(200)
+      .expect({ status: 'ok' });
+  });
 });

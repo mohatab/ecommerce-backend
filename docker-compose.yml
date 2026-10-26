@@ -1,4 +1,68 @@
 services:
+  app:
+    build:
+      context: .
+      # Explicit, even though runtime is the last stage and therefore the
+      # default. Naming it means reordering the Dockerfile cannot silently
+      # change what compose runs.
+      target: runtime
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '3000:3000'
+    environment:
+      # The dev database, reached by SERVICE NAME on the compose network --
+      # not localhost, which inside a container is the container itself.
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/ecommerce_dev
+      # NODE_ENV=production is what the image sets, and these three are
+      # required there: fake payments are rejected, CORS may not be '*', and
+      # the proxy hop count has no default.
+      PAYMENT_PROVIDER: stripe
+      PAYMENT_API_KEY: ${PAYMENT_API_KEY:-sk_test_local_not_a_real_key}
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:-local-only-webhook-secret}
+      JWT_SECRET: ${JWT_SECRET:-local-only-change-me-32-characters-min}
+      # LITERAL, not ${CORS_ORIGIN:-...}, and the exception is load-bearing:
+      # compose interpolates ${VAR} from the project's own .env file, so the
+      # DEV value wins over any default written here. This repo's .env carries
+      # CORS_ORIGIN=* (correct for development, where NODE_ENV is development),
+      # and production rejects '*' outright -- so the interpolated form made
+      # this service crash-loop on `Config validation error: "CORS_ORIGIN"
+      # contains an invalid value`. Measured, not theorised. Override it with a
+      # compose override file or `-e`, never by adding it to .env, which would
+      # also change what `npm run start:dev` sees.
+      CORS_ORIGIN: http://localhost:3000
+      # 0 == trust nothing, correct for direct-to-container with no proxy in
+      # front. Set it to the number of proxies that will append to
+      # X-Forwarded-For in whatever topology you actually run -- in an
+      # override file or with `-e`, NOT in .env.
+      #
+      # LITERAL for the same reason as CORS_ORIGIN above, but this one matters
+      # more: a wrong CORS_ORIGIN crash-loops loudly, while a TRUST_PROXY_HOPS
+      # inherited from .env would be ACCEPTED. The schema has no upper bound
+      # (Joi.number().integer().min(0)), so a value higher than the real chain
+      # depth makes Express read attacker-supplied X-Forwarded-For entries,
+      # collapsing or bypassing every throttle bucket, with normal boot logs
+      # and no error. env.validation.ts says it: too high is the dangerous
+      # direction, and it is the silent one.
+      TRUST_PROXY_HOPS: 0
+
+  migrate:
+    build:
+      context: .
+      target: migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/ecommerce_dev
+    # A one-shot release command, not a service: run it with
+    #   docker compose run --rm migrate
+    # and require exit 0 before starting `app`. Migrations never run at
+    # application boot.
+    restart: 'no'
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped

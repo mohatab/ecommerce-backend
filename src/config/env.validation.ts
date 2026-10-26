@@ -22,7 +22,51 @@ export const envValidationSchema = Joi.object({
     .default('development'),
   PORT: Joi.number().port().default(3000),
   DATABASE_URL: Joi.string().uri().required(),
-  CORS_ORIGIN: Joi.string().default('*'),
+  // Phase 6. '*' is forbidden under production, and this is deliberately the
+  // WEAKEST of the phase's three guards - recorded as such rather than
+  // oversold. Bearer-token auth means a wildcard leaks no credential by
+  // itself and no browser attaches one automatically. What earns the guard is
+  // the combination with an API that has an admin surface: a wildcard origin
+  // lets any origin script those routes with a token obtained some other way.
+  //
+  // Required under production, so the value is always a deliberate choice. If
+  // a deployment genuinely needs a wildcard it must amend the Phase 6 spec,
+  // which is the intended friction.
+  CORS_ORIGIN: Joi.string()
+    .default('*')
+    .when('NODE_ENV', {
+      is: 'production',
+      then: Joi.string().invalid('*').required(),
+    }),
+  // Phase 6. Express's `trust proxy`, and therefore every throttle bucket:
+  // ThrottlerGuard.getTracker() returns bare `req.ip`, and `req.ip` honours
+  // this setting. One app.set() is the whole mechanism - no custom tracker.
+  //
+  // REQUIRED under production, with no default, because NEITHER default is
+  // safe. 0 behind a proxy makes Express report the PROXY's address for every
+  // request, collapsing all clients into one bucket: the 5/min limit on login
+  // becomes 5/min for the entire internet, and the load balancer's own health
+  // probes share that budget. Anything HIGHER than the real chain depth is a
+  // full bypass, because Express counts past the proxy-appended entries into
+  // attacker-supplied ones. Which failure is worse depends on the topology,
+  // which this code cannot know. So the deployer states it.
+  //
+  // Note the asymmetry for whoever operates this: too LOW degrades
+  // availability loudly (everyone throttled together); too HIGH removes the
+  // control silently. Too high is the dangerous direction.
+  //
+  // The value is the number of proxies that will APPEND to X-Forwarded-For.
+  // 0 for direct-to-Node, 1 for one reverse proxy, 2 for a CDN in front of a
+  // load balancer. There is no universally correct value and 1 is not a
+  // recommendation - it is only the reference topology the tests use.
+  TRUST_PROXY_HOPS: Joi.number()
+    .integer()
+    .min(0)
+    .default(0)
+    .when('NODE_ENV', {
+      is: 'production',
+      then: Joi.number().integer().min(0).required(),
+    }),
   TEST_DATABASE_URL: Joi.string().uri().optional(),
   JWT_SECRET: Joi.string().min(32).required(),
   JWT_ACCESS_TTL: Joi.string().pattern(TTL_PATTERN).default('15m'),

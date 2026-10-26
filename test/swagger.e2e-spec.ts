@@ -72,6 +72,7 @@ describe('OpenAPI document (e2e)', () => {
         'GET /api/v1/products',
         'GET /api/v1/products/{id}',
         'GET /health',
+        'GET /health/live',
         'PATCH /api/v1/admin/products/{id}',
         'POST /api/v1/admin/maintenance/{job}/run',
         'POST /api/v1/admin/products',

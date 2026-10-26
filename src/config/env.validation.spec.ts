@@ -20,6 +20,7 @@ interface ValidatedEnv {
   PAYMENT_API_KEY?: string;
   PAYMENT_WEBHOOK_SECRET: string;
   MAINTENANCE_JOBS_ENABLED: boolean;
+  TRUST_PROXY_HOPS: number;
 }
 
 function validate(env: Record<string, unknown>): {
@@ -42,6 +43,27 @@ function validEnv(
     PAYMENT_WEBHOOK_SECRET: 'y'.repeat(20),
     ...overrides,
   };
+}
+
+/**
+ * The smallest environment that boots under NODE_ENV=production.
+ *
+ * Production has strictly MORE required variables than development, because
+ * three guards have no safe default there (spec section 7). Keeping that
+ * difference in one helper is what stops every production test from drifting
+ * its own ad-hoc variable list.
+ */
+function validProdEnv(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return validEnv({
+    NODE_ENV: 'production',
+    PAYMENT_PROVIDER: 'stripe',
+    PAYMENT_API_KEY: 'sk_test_example',
+    TRUST_PROXY_HOPS: 0,
+    CORS_ORIGIN: 'https://shop.example.test',
+    ...overrides,
+  });
 }
 
 function rejectedKeys(error: ValidationError | undefined): string[] {
@@ -221,6 +243,101 @@ describe('envValidationSchema', () => {
     });
   });
 
+  describe('TRUST_PROXY_HOPS', () => {
+    it('defaults to 0 outside production', () => {
+      const { error, value } = validate(validEnv());
+
+      expect(error).toBeUndefined();
+      expect(value.TRUST_PROXY_HOPS).toBe(0);
+    });
+
+    // C-D6's schema half. The container half is T6.
+    //
+    // No default under production, and that is the whole policy: neither
+    // default is safe. 0 behind a proxy collapses every client into ONE
+    // bucket (a trivial DoS against all users, and the load balancer's own
+    // probes share it). Anything higher than the real hop count is a full
+    // bypass. Which is worse depends on the topology, which the code cannot
+    // know - so the deployer must say.
+    it('is required under NODE_ENV=production, with no default', () => {
+      const env = validProdEnv();
+      delete env.TRUST_PROXY_HOPS;
+
+      expect(rejectedKeys(validate(env).error)).toContain('TRUST_PROXY_HOPS');
+    });
+
+    it('accepts an explicit 0 under production, for direct-to-Node', () => {
+      expect(
+        validate(validProdEnv({ TRUST_PROXY_HOPS: 0 })).error,
+      ).toBeUndefined();
+    });
+
+    it('accepts 2 under production, for a two-proxy chain', () => {
+      expect(
+        validate(validProdEnv({ TRUST_PROXY_HOPS: 2 })).error,
+      ).toBeUndefined();
+    });
+
+    // Review Focus 2. `trust proxy` accepts a number, a string or a function,
+    // but this app only ever hands it a NUMBER: configuration.ts reads
+    // TRUST_PROXY_HOPS through parseInt before bootstrap.ts calls
+    // app.set('trust proxy', ...), so proxy-addr never sees the raw string and
+    // its loud throw on a non-numeric one is unreachable on this path.
+    // Measured along the real path instead (express 5.2.1), every value below
+    // fails SILENTLY: 'abc' and '' parseInt to NaN, and compileTrust returns
+    // `i < NaN` - always false, so nothing is trusted, with no error and no
+    // log; -1 compiles to the same always-false function; and 1.5 parseInts to
+    // 1, quietly trusting one hop as though that had been configured. Joi is
+    // the only thing that can refuse them, which is why it must.
+    it.each([
+      ['a non-numeric string', 'abc'],
+      ['a negative count', -1],
+      ['a fractional count', 1.5],
+      ['an empty string', ''],
+    ])('rejects %s', (_label, bad) => {
+      expect(
+        rejectedKeys(validate(validEnv({ TRUST_PROXY_HOPS: bad })).error),
+      ).toContain('TRUST_PROXY_HOPS');
+    });
+  });
+
+  describe('CORS_ORIGIN', () => {
+    it("defaults to '*' outside production", () => {
+      const { error, value } = validate(validEnv());
+
+      expect(error).toBeUndefined();
+      expect(value.CORS_ORIGIN).toBe('*');
+    });
+
+    // C-D7's schema half. The container half is T6.
+    //
+    // The weakest of this phase's three guards, and the spec says so: this
+    // API authenticates with bearer tokens, not cookies, so '*' leaks no
+    // credential by itself and no browser attaches one automatically. What
+    // makes it worth forbidding is the combination with a published admin
+    // surface: a wildcard origin lets ANY origin script admin routes with a
+    // token obtained some other way.
+    it("rejects '*' under NODE_ENV=production", () => {
+      const env = validProdEnv({ CORS_ORIGIN: '*' });
+
+      expect(rejectedKeys(validate(env).error)).toContain('CORS_ORIGIN');
+    });
+
+    it('is required under NODE_ENV=production, with no default', () => {
+      const env = validProdEnv();
+      delete env.CORS_ORIGIN;
+
+      expect(rejectedKeys(validate(env).error)).toContain('CORS_ORIGIN');
+    });
+
+    it('accepts an explicit origin under production', () => {
+      expect(
+        validate(validProdEnv({ CORS_ORIGIN: 'https://shop.example.test' }))
+          .error,
+      ).toBeUndefined();
+    });
+  });
+
   describe('payments configuration', () => {
     it('rejects a missing PAYMENT_PROVIDER — there is no default', () => {
       const env = validEnv();
@@ -244,13 +361,7 @@ describe('envValidationSchema', () => {
     });
 
     it('accepts the stripe provider under NODE_ENV=production when a key is set', () => {
-      const { error } = validate(
-        validEnv({
-          NODE_ENV: 'production',
-          PAYMENT_PROVIDER: 'stripe',
-          PAYMENT_API_KEY: 'sk_test_example',
-        }),
-      );
+      const { error } = validate(validProdEnv());
 
       expect(error).toBeUndefined();
     });
