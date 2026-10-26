@@ -2,21 +2,167 @@
 
 [![CI](https://github.com/mohatab/ecommerce-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/mohatab/ecommerce-backend/actions/workflows/ci.yml)
 
-A production-grade e-commerce backend, built as a portfolio project to demonstrate clean, maintainable backend architecture.
+A REST API for an e-commerce domain — authentication, catalog, cart, checkout,
+Stripe payments, and scheduled maintenance — built phase by phase as a portfolio
+project. The aim is **depth rather than feature count**: clean module
+boundaries, concurrency that holds under real parallel load, and a container
+that CI actually runs rather than merely builds.
 
-## Tech Stack
+**Node.js 20 · TypeScript (strict) · NestJS · PostgreSQL + Prisma · JWT (HS256) +
+Argon2id · Stripe · Docker · Jest · OpenAPI**
 
-- **Node.js** / **TypeScript** (strict mode)
-- **NestJS** — application framework
-- **PostgreSQL** + **Prisma ORM** — persistence
-- **`@nestjs/schedule`** — in-process cron for scheduled maintenance
-- **JWT** (`@nestjs/jwt`) — authentication, HS256 access tokens
-- **Argon2id** (`@node-rs/argon2`) — password hashing
-- **`@nestjs/throttler`** — rate limiting
-- **`stripe`** — payment provider SDK, pinned API version
-- **Docker** — containerization
-- **Jest** — testing
-- **Swagger** — API documentation
+- **9 domain modules**, **25 documented operations** across 22 paths, pinned by a
+  test that fails when an endpoint appears or disappears undocumented
+- **447 unit tests** in 33 suites; **347 e2e tests** in 29 suites, against real
+  PostgreSQL in Docker — including concurrency suites that fire genuine parallel
+  HTTP
+- **Four CI jobs** on every push to `master` and every pull request into it;
+  one of them runs the **real image**:
+  builds it, migrates a throwaway database, serves traffic, waits for Docker's
+  own health status, and stops it with a clean exit
+
+**This is not production-ready, and says so.**
+[`docs/deferred-limitations.md`](docs/deferred-limitations.md) records every
+accepted gap — most with an owner and the trigger that would close it —
+alongside the entries previous phases closed **by shipping the fix, never by
+deleting the entry**. No refunds, no remediation of detected payment divergence,
+and a single-instance topology are accepted limits, not oversights.
+
+## Four decisions worth asking about
+
+**1. A signature-verified webhook is the only writer of `PAID`.**
+`OrdersService.markPaid()` ([`orders.service.ts:209`](src/modules/orders/orders.service.ts))
+is the single place `OrderStatus.PAID` is written in `src/`, and
+`PaymentWebhookService` ([`payment-webhook.service.ts:92`](src/modules/payments/payment-webhook.service.ts))
+is its only caller. There is deliberately **no "confirm payment" endpoint**: a
+convenience route would be a second writer competing for authority, needing its
+own idempotency, ownership, and concurrency story. Order completion is
+out-of-band by design.
+
+**2. The predicate travels with the write.**
+Every state transition that must happen at most once is a conditional
+`updateMany`, never read-then-check-then-write — PostgreSQL re-evaluates the
+`WHERE` against the committed row, so a racing pair produces one `count === 1`
+and one `count === 0`:
+
+| Operation | Predicate carried with the write |
+|---|---|
+| Stock decrement ([`products.service.ts:160`](src/modules/products/products.service.ts)) | `id, isActive: true, stockQuantity: { gte: quantity }` |
+| Order cancellation ([`orders.service.ts:78`](src/modules/orders/orders.service.ts)) | `id, userId, status: PENDING` |
+| Refresh-token rotation ([`refresh-token.service.ts:68`](src/modules/auth/refresh-token.service.ts)) | `id, revokedAt: null` |
+| Maintenance lease ([`maintenance-lease.service.ts:55`](src/modules/maintenance/maintenance-lease.service.ts)) | `job, expiresAt: { lte: now }` |
+
+Reading the row, checking it, then updating lets two concurrent requests both
+pass the check. The first three were verified by breaking them first and watching
+the naive version fail: 25 concurrent checkouts against stock 5 all returned 201,
+cancellation restored stock ten times instead of once, and the old rotation
+sequence consumed one refresh token twice. Breaking the fourth is the more
+interesting result, and it is recorded as a **null result** rather than a win —
+see decision 3.
+
+**3. The lease prevents wasted work; CAS and a transaction fence prevent wrong work.**
+Scheduled maintenance takes a `MaintenanceLease` row rather than a PostgreSQL
+advisory lock — a pooled client has no connection affinity, so a session-scoped
+advisory lock can be released on a different connection and leak. Crucially,
+**correctness never depends on the lease being exclusive**:
+`assertHeld(tx, job)` is the first statement of the sweep's one mutating
+transaction, on the caller's transaction, so an instance that lost its lease
+cannot commit — and
+even with the lease removed entirely, the per-order CAS still restores stock
+exactly once. Proven by a control that removes both and observes the stock
+conserved anyway.
+
+**4. The serving image carries no migration tooling.**
+Migrations are a discrete release command, never run at application boot. The
+migrator and the server are two `--target` builds of **one Dockerfile at one
+commit**, so a migration can no longer be applied from a different checkout than
+the running image, and the runtime stage prunes the Prisma CLI and schema engine
+([`Dockerfile:79`](Dockerfile)). Keeping them out took an explicit `rm -rf`:
+`npm ci --omit=dev` alone leaves them behind, for a reason worth knowing if you
+ever rely on that flag — the Dockerfile comment explains it. This is a **tooling
+boundary, not a capability boundary**: raw SQL and the database role are
+unchanged, so it does **not** make schema mutation from a serving container
+impossible.
+
+## Architecture
+
+```
+HTTP  →  ThrottlerGuard  →  JwtAuthGuard  →  RolesGuard  →  Controller  →  Service  →  PrismaService  →  PostgreSQL
+         (global, 100/min)  (global,        (opt-in,        (thin: DTO    (all business   (the only
+                             fails closed)   @Roles)         in, DTO out)  logic)          data access)
+```
+
+Guard order is registration-order dependent and load-bearing: throttling runs
+before any token verification, and `RolesGuard` reads the user that
+`JwtAuthGuard` populates.
+
+| Layer | Contents |
+|---|---|
+| `src/modules/*` | One folder per domain — `auth`, `users`, `categories`, `products`, `cart`, `orders`, `payments`, `maintenance`, `health`. A module reaches another only through its exported providers. |
+| `src/common/` | Cross-cutting only: filters, interceptors, guards, pipes, shared DTOs. Never domain logic. |
+| `src/config/` | The single place that reads `process.env`. Joi validates at boot and **aborts** on anything invalid. |
+| `src/prisma/` | The only database access layer; `PrismaService` is the only `PrismaClient`. |
+
+Money is **integer minor units everywhere** — `priceCents` at
+[`schema.prisma:63`](prisma/schema.prisma), `totalCents` at `:123`, both `Int`,
+never floating point.
+Checkout is idempotent on a caller-supplied key via a
+`@@unique([userId, idempotencyKey])` constraint
+([`schema.prisma:137`](prisma/schema.prisma)), and webhook deliveries dedupe
+inside one statement with `createMany({ skipDuplicates: true })` rather than a
+caught `P2002` — a 4xx would tell the provider to stop retrying and permanently
+lose a transient duplicate.
+
+Routes live under `/api/v1/*` (global prefix plus URI versioning); `/health` and
+`/health/live` are excluded from both so infrastructure probes have a stable
+path.
+
+## Quick start
+
+```bash
+npm install
+cp .env.example .env                              # set JWT_SECRET to 32+ chars
+docker compose up -d postgres postgres-test       # databases only
+npm run prisma:generate
+npm run prisma:migrate
+npm run start:dev
+```
+
+API on `http://localhost:3000`, Swagger UI on `http://localhost:3000/api/docs`
+(not served when `NODE_ENV=production` — see [Deployment](#deployment)). There is
+no frontend: the Swagger UI and `curl` are the intended way to drive it.
+
+Create the first administrator with the compiled bootstrap script described
+under [Creating the first administrator](#creating-the-first-administrator).
+Note one accepted gap before trying the admin catalog: **Phase 2 ships no
+category write route**, so a product cannot be created until a category exists
+in the database — `POST /api/v1/admin/products` returns 409 on an unknown
+`categoryId`. See [the catalog entry](docs/deferred-limitations.md) for the
+workaround and why it was deferred rather than patched in passing.
+
+## Verifying
+
+```bash
+npm run lint:ci      # no autofix — the same command CI runs
+npm run build
+npm test             # 33 suites / 447 tests
+npm run test:e2e     # 29 suites / 347 tests, needs postgres-test on 5433
+```
+
+The e2e suite runs serially against a real database and takes a session-scoped
+advisory lock, so a second concurrent run refuses rather than corrupting the
+first. Counts above are from a local run at the Phase 6 closeout; the badge at
+the top reflects the live conclusion of that workflow on `master`. The four jobs
+are `build`, `e2e`, `docker` and `bootstrap`.
+
+## Where to read more
+
+| Document | What it covers |
+|---|---|
+| [`docs/deferred-limitations.md`](docs/deferred-limitations.md) | Every accepted gap, with owner and trigger. Closed by shipping, never by deleting an entry. |
+| [`CLAUDE.md`](CLAUDE.md) | The architectural rules the code is held to, and the reasoning behind the non-obvious ones. |
+| [`docs/superpowers/specs/`](docs/superpowers/specs/) | Per-phase design specs: the alternatives considered, the decisions locked, and the negative control proving each concurrency claim. |
+| `/api/docs` | Live OpenAPI UI in development. |
 
 ## Project Status
 
@@ -56,7 +202,10 @@ npm install
 cp .env.example .env
 
 # 3. Start PostgreSQL (dev on 5432, test on 5433)
-docker compose up -d
+# Name the services: a bare `docker compose up -d` would also start the `app`
+# and one-shot `migrate` containers added in Phase 6, and `app` publishes 3000,
+# which collides with step 5.
+docker compose up -d postgres postgres-test
 
 # 4. Generate the Prisma client
 npm run prisma:generate
