@@ -134,11 +134,23 @@ no frontend: the Swagger UI and `curl` are the intended way to drive it.
 
 Create the first administrator with the compiled bootstrap script described
 under [Creating the first administrator](#creating-the-first-administrator).
-Note one accepted gap before trying the admin catalog: **Phase 2 ships no
-category write route**, so a product cannot be created until a category exists
-in the database — `POST /api/v1/admin/products` returns 409 on an unknown
-`categoryId`. See [the catalog entry](docs/deferred-limitations.md) for the
-workaround and why it was deferred rather than patched in passing.
+Then, as that admin, create a category before a product — `Product.categoryId`
+is required, so `POST /api/v1/admin/products` returns 409 on an unknown
+`categoryId`:
+
+```bash
+TOKEN=<accessToken from POST /api/v1/auth/login as that admin>
+
+# 1. a category, whose id the next call needs
+curl -X POST http://localhost:3000/api/v1/admin/categories \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"Desks","slug":"desks"}'
+
+# 2. a product in it
+curl -X POST http://localhost:3000/api/v1/admin/products \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"Desk Lamp","description":"An adjustable desk lamp.","priceCents":4999,"categoryId":"<id from step 1>"}'
+```
 
 ## Verifying
 
@@ -288,11 +300,12 @@ order, because the key is scoped to `(userId, idempotencyKey)`. Stock is
 decremented with an atomic, conditional update inside one transaction, so
 concurrent checkouts for the last unit of a product cannot oversell it.
 
-Phase 2 ships no category write route, so a category must exist before
-`POST /api/v1/admin/products` can succeed — until one arrives, insert the
-category directly in the database. A deactivated product (`DELETE`) is
-recoverable only by an operator who already holds its id: there is no admin
-list route to rediscover it once lost.
+A category must exist before `POST /api/v1/admin/products` can succeed, and
+`POST /api/v1/admin/categories` is how an admin creates one — so a fresh
+database is reachable through the API alone. A deactivated product (`DELETE`)
+is still recoverable only by an operator who already holds its id: there is no
+admin list route to rediscover it once lost, and that half of
+[the catalog entry](docs/deferred-limitations.md) stays open.
 
 ### Payments
 

@@ -330,7 +330,40 @@ Removing them is a separate change with its own verification, deliberately **not
 bundled into the migration-tooling prune, because the prune's safety argument is
 about engine binaries and would not transfer.
 
-### The admin catalog write surface is unreachable on a fresh database without a direct database insert
+### The admin catalog write surface is unreachable on a fresh database without a direct database insert — PARTLY CLOSED
+
+The heading is **not struck through**, because half of this entry is still
+open.
+
+**Closed by shipping:** `POST /api/v1/admin/categories` now exists
+(`src/modules/categories/admin-categories.controller.ts`), admin-only through a
+single class-level `@Roles(Role.ADMIN)`. A fresh database therefore accepts a
+product through the API alone: create a category, then create a product against
+the returned `id`. That journey is asserted end to end by
+*"lets an ADMIN create a product against a category created through the API"* in
+`test/admin-categories.e2e-spec.ts`, which runs against a truncated database and
+uses nothing but HTTP. Duplicate `name` or `slug` returns 409 through
+`HttpExceptionFilter`'s existing `P2002` map, with no local `try/catch` — a
+control that swallowed the error in the service was recorded returning 500
+instead.
+
+**Still open — the other half of this entry.** A deactivated product's id is
+still unrecoverable through the API. `DELETE /api/v1/admin/products/:id` is a
+soft deactivation reversible with `PATCH { "isActive": true }`, but only by a
+caller who already holds the id: no admin product list ships, the public list
+excludes inactive products, and the public detail route 404s on one. Once an id
+is lost the row is undiscoverable through the API even though it still exists.
+**Owner: unscheduled.** Closing it needs an admin product list, which is its own
+task.
+
+Two things this closure deliberately did **not** change: category deletion is
+still unimplemented, because it needs the orphan policy Phase 2 declined to
+invent, and `Product.category`'s `onDelete: Restrict` is untouched.
+
+**The original entry is preserved verbatim below, per this file's no-deletion
+rule. It describes the state before the category route shipped.**
+
+---
 
 **Owner: unscheduled.**
 
