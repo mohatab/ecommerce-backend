@@ -94,17 +94,385 @@ jobs:
         run: npm run test:e2e
 
   docker:
-    name: Docker image builds
+    name: Docker image runs and serves
     runs-on: ubuntu-latest
 
-    # The Dockerfile is the designated deploy unit, so it is built on every
-    # push and PR to catch breakage at the commit that causes it. Build only:
-    # no tag push, no registry login, no publish — that belongs to Phase 6.
+    # Phase 6. This job used to run `docker build` and stop, which proved only
+    # that the Dockerfile parses -- not that the container starts, connects and
+    # serves. It now runs the real artifact.
+    #
+    # Publishing: the old comment here said a registry push "belongs to Phase 6".
+    # Phase 6 DECLINED it (D10). No registry login, no push, no tag publish --
+    # an image nothing pulls is not a deployment, and a registry needs an owner,
+    # a retention policy and credentials this project has no consumer for. The
+    # artifact is proven by being RUN here, not by being stored somewhere.
+    #
+    # NOTE ON THE DATABASE, AND PLEASE DO NOT "FIX" IT BACK: every other
+    # database job here uses a GitHub Actions `services:` container, reached on
+    # localhost. That cannot work for this job, because the app under test is
+    # itself a `docker run` container on its own network, and a service
+    # container is not reachable from there by localhost. So Postgres runs as a
+    # plain container on a user-defined network and is addressed BY NAME.
+    #
+    # A bonus that is the only network boundary this phase actually verifies:
+    # on a user-defined network Postgres needs no published port at all, so the
+    # app reaches a database that is unreachable from outside the network.
+    env:
+      IMAGE: ecommerce-backend
+      NETWORK: phase6-smoke
+      PGHOST_CONTAINER: smoke-postgres
+      DB_URL: postgresql://postgres:postgres@smoke-postgres:5432/ecommerce_smoke
+      # Required under NODE_ENV=production. `fake` is rejected there, which
+      # forces the Stripe adapter -- whose constructor needs a non-empty key
+      # but makes NO network call, so an obviously fake key boots fine. No
+      # endpoint asserted below reaches the provider.
+      SMOKE_JWT_SECRET: ci-only-secret-not-used-outside-continuous-integration
+      SMOKE_API_KEY: sk_test_ci_only_not_a_real_key
+      SMOKE_WEBHOOK_SECRET: ci-only-webhook-secret-not-used-outside-ci
+      SMOKE_CORS_ORIGIN: https://ci.example.test
+      SMOKE_TRUST_PROXY_HOPS: '1'
+
     steps:
       - uses: actions/checkout@v5
 
-      - name: Build image
-        run: docker build -t ecommerce-backend:ci .
+      # Two --target invocations, one Dockerfile, one commit, one build
+      # context. Deliberately NOT buildx or Bake: adding a tool just to make a
+      # single command emit two tags would be a dependency bought with a
+      # phrase. The shared `build` stage is built once and cached for the
+      # second invocation.
+      - name: Build the runtime image
+        run: docker build --target runtime -t "$IMAGE:smoke-runtime" .
+
+      - name: Build the migration image
+        run: docker build --target migrate -t "$IMAGE:smoke-migrate" .
+
+      # Guards the Dockerfile stage order: `runtime` must stay last, so a bare
+      # `docker build` keeps producing the server and not the migrator.
+      - name: Assert the default build target is still the server
+        run: |
+          set -euo pipefail
+          docker build -t "$IMAGE:smoke-default" .
+          CMD_JSON=$(docker inspect -f '{{json .Config.Cmd}}' "$IMAGE:smoke-default")
+          echo "default CMD: $CMD_JSON"
+          test "$CMD_JSON" = '["node","dist/main"]'
+
+      - name: Create the smoke network and start Postgres
+        run: |
+          set -euo pipefail
+          docker network create "$NETWORK"
+          # No -p: nothing outside this network can reach the database.
+          docker run -d --name "$PGHOST_CONTAINER" --network "$NETWORK" \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=ecommerce_smoke \
+            --health-cmd 'pg_isready -U postgres' \
+            --health-interval 5s --health-timeout 5s --health-retries 10 \
+            postgres:16-alpine
+          for i in $(seq 1 30); do
+            STATUS=$(docker inspect -f '{{.State.Health.Status}}' "$PGHOST_CONTAINER")
+            [ "$STATUS" = healthy ] && break
+            sleep 2
+          done
+          test "$(docker inspect -f '{{.State.Health.Status}}' "$PGHOST_CONTAINER")" = healthy
+
+      - name: Run migrations from the migration image
+        run: |
+          set -euo pipefail
+          docker run --rm --network "$NETWORK" -e DATABASE_URL="$DB_URL" \
+            "$IMAGE:smoke-migrate"
+          # All five committed migrations must be recorded as applied.
+          APPLIED=$(docker exec "$PGHOST_CONTAINER" psql -U postgres -d ecommerce_smoke -tAc \
+            "SELECT count(*) FROM _prisma_migrations WHERE finished_at IS NOT NULL;")
+          echo "applied migrations: $APPLIED"
+          test "$APPLIED" = "5"
+
+      # C-D5, C-D6, C-D7. Each proves that a guard already unit-tested ALSO
+      # holds in the artifact that ships. That gap -- schema proven, image
+      # unproven -- is the whole reason this job exists.
+      #
+      # Each asserts a NON-ZERO exit AND the offending variable named in the
+      # output. Exit-code-only checking would pass against a container that
+      # died for an unrelated reason.
+      - name: C-D5 - the image refuses the fake payment provider in production
+        run: |
+          set -euo pipefail
+          set +e
+          # `timeout` is what makes this control FAIL rather than HANG. Without
+          # -d, `docker run` blocks until the container exits -- which is the
+          # point when the guard holds (it aborts in about a second), but if the
+          # guard ever REGRESSES the container boots and serves, and this step
+          # would block until the job's own timeout with neither assertion
+          # reached. Measured during Step 11's mutations, which left containers
+          # running for hours. 30s is far past the real abort.
+          OUT=$(timeout -k 5 30 docker run --rm --name smoke-abort-cd5 --network "$NETWORK" \
+            -e DATABASE_URL="$DB_URL" -e JWT_SECRET="$SMOKE_JWT_SECRET" \
+            -e PAYMENT_PROVIDER=fake \
+            -e PAYMENT_WEBHOOK_SECRET="$SMOKE_WEBHOOK_SECRET" \
+            -e CORS_ORIGIN="$SMOKE_CORS_ORIGIN" \
+            -e TRUST_PROXY_HOPS="$SMOKE_TRUST_PROXY_HOPS" \
+            "$IMAGE:smoke-runtime" 2>&1)
+          CODE=$?
+          set -e
+          docker rm -f smoke-abort-cd5 >/dev/null 2>&1 || true
+          echo "$OUT"
+          test "$CODE" -ne 0
+          echo "$OUT" | grep -q 'PAYMENT_PROVIDER'
+
+      - name: C-D6 - the image refuses to boot without TRUST_PROXY_HOPS
+        run: |
+          set -euo pipefail
+          set +e
+          # `timeout` is what makes this control FAIL rather than HANG. Without
+          # -d, `docker run` blocks until the container exits -- which is the
+          # point when the guard holds (it aborts in about a second), but if the
+          # guard ever REGRESSES the container boots and serves, and this step
+          # would block until the job's own timeout with neither assertion
+          # reached. Measured during Step 11's mutations, which left containers
+          # running for hours. 30s is far past the real abort.
+          OUT=$(timeout -k 5 30 docker run --rm --name smoke-abort-cd6 --network "$NETWORK" \
+            -e DATABASE_URL="$DB_URL" -e JWT_SECRET="$SMOKE_JWT_SECRET" \
+            -e PAYMENT_PROVIDER=stripe -e PAYMENT_API_KEY="$SMOKE_API_KEY" \
+            -e PAYMENT_WEBHOOK_SECRET="$SMOKE_WEBHOOK_SECRET" \
+            -e CORS_ORIGIN="$SMOKE_CORS_ORIGIN" \
+            "$IMAGE:smoke-runtime" 2>&1)
+          CODE=$?
+          set -e
+          docker rm -f smoke-abort-cd6 >/dev/null 2>&1 || true
+          echo "$OUT"
+          test "$CODE" -ne 0
+          echo "$OUT" | grep -q 'TRUST_PROXY_HOPS'
+
+      - name: C-D7 - the image refuses a wildcard CORS origin in production
+        run: |
+          set -euo pipefail
+          set +e
+          # `timeout` is what makes this control FAIL rather than HANG. Without
+          # -d, `docker run` blocks until the container exits -- which is the
+          # point when the guard holds (it aborts in about a second), but if the
+          # guard ever REGRESSES the container boots and serves, and this step
+          # would block until the job's own timeout with neither assertion
+          # reached. Measured during Step 11's mutations, which left containers
+          # running for hours. 30s is far past the real abort.
+          OUT=$(timeout -k 5 30 docker run --rm --name smoke-abort-cd7 --network "$NETWORK" \
+            -e DATABASE_URL="$DB_URL" -e JWT_SECRET="$SMOKE_JWT_SECRET" \
+            -e PAYMENT_PROVIDER=stripe -e PAYMENT_API_KEY="$SMOKE_API_KEY" \
+            -e PAYMENT_WEBHOOK_SECRET="$SMOKE_WEBHOOK_SECRET" \
+            -e CORS_ORIGIN='*' \
+            -e TRUST_PROXY_HOPS="$SMOKE_TRUST_PROXY_HOPS" \
+            "$IMAGE:smoke-runtime" 2>&1)
+          CODE=$?
+          set -e
+          docker rm -f smoke-abort-cd7 >/dev/null 2>&1 || true
+          echo "$OUT"
+          test "$CODE" -ne 0
+          echo "$OUT" | grep -q 'CORS_ORIGIN'
+
+      - name: Start the runtime container
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke-app --network "$NETWORK" -p 3000:3000 \
+            -e DATABASE_URL="$DB_URL" -e JWT_SECRET="$SMOKE_JWT_SECRET" \
+            -e PAYMENT_PROVIDER=stripe -e PAYMENT_API_KEY="$SMOKE_API_KEY" \
+            -e PAYMENT_WEBHOOK_SECRET="$SMOKE_WEBHOOK_SECRET" \
+            -e CORS_ORIGIN="$SMOKE_CORS_ORIGIN" \
+            -e TRUST_PROXY_HOPS="$SMOKE_TRUST_PROXY_HOPS" \
+            "$IMAGE:smoke-runtime"
+
+      # Bounded polling, never a fixed sleep: a sleep either flakes when the
+      # boot is slow or wastes time when it is fast. A timeout here is a
+      # FAILURE, not a skip.
+      - name: Wait for the endpoint to serve
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:3000/health/live >/dev/null 2>&1; then
+              echo "serving after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::/health/live never served"
+          exit 1
+
+      # C-D11. Docker's OWN health state, not an inference from the step above.
+      #
+      # The two prove different things and either can pass while the other
+      # fails: polling the endpoint proves the ENDPOINT serves; polling this
+      # proves the CHECK works. A HEALTHCHECK whose command is missing from the
+      # image reports `unhealthy` rather than erroring, so nothing in the
+      # application log would name the cause.
+      #
+      # Ceiling accommodates start-period (15s) + interval (10s) x retries (3)
+      # with margin.
+      - name: C-D11 - Docker reports the container healthy
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 40); do
+            STATUS=$(docker inspect -f '{{.State.Health.Status}}' smoke-app)
+            echo "attempt ${i}: ${STATUS}"
+            if [ "$STATUS" = healthy ]; then exit 0; fi
+            if [ "$STATUS" = unhealthy ]; then
+              echo "::error::container reported unhealthy"
+              docker inspect -f '{{json .State.Health}}' smoke-app
+              exit 1
+            fi
+            sleep 3
+          done
+          echo "::error::health status never reached healthy (timeout is a failure)"
+          docker inspect -f '{{json .State.Health}}' smoke-app
+          exit 1
+
+      # C-D11, the other two halves. A green status alone does not prove the
+      # configured command can run, nor that it targets the right endpoint --
+      # a check pointed at /health would report healthy while carrying exactly
+      # the defect the liveness split exists to prevent.
+      - name: C-D11 - the configured command runs in the image and targets /health/live
+        run: |
+          set -euo pipefail
+          # Read the REGISTERED check, never a hand-copy. A hand-copied `wget`
+          # line passes against a check that was switched to curl: measured,
+          # that mutation was caught only by the status poll, because wget is
+          # still in the image and `command -v wget` still succeeded.
+          test "$(docker inspect -f '{{index .Config.Healthcheck.Test 0}}' "$IMAGE:smoke-runtime")" = CMD-SHELL
+          HC_CMD=$(docker inspect -f '{{index .Config.Healthcheck.Test 1}}' "$IMAGE:smoke-runtime")
+          echo "registered healthcheck: $HC_CMD"
+          # Targets /health/live, and nothing else under /health. The previous
+          # form, `grep -vq '"/health"'`, could NEVER fail: the URL in the
+          # registered string is never followed by a closing quote, so the
+          # pattern missed even when the check WAS pointed at /health.
+          printf '%s' "$HC_CMD" | grep -q '/health/live'
+          test -z "$(printf '%s' "$HC_CMD" | sed 's#/health/live##g' | grep -o '/health' || true)"
+          # Execute exactly what Docker executes, where Docker executes it.
+          # This is the line that catches a command missing from the image.
+          docker exec smoke-app sh -c "$HC_CMD"
+
+      - name: Readiness and routing probes
+        run: |
+          set -euo pipefail
+          # /health proves Prisma connected to a real database from inside the
+          # container.
+          curl -fsS http://127.0.0.1:3000/health | tee /tmp/health.json
+          grep -q '"status":"ok"' /tmp/health.json
+
+          curl -fsS http://127.0.0.1:3000/health/live | tee /tmp/live.json
+          grep -q '"status":"ok"' /tmp/live.json
+
+          # One request exercising the global prefix, URI versioning, the
+          # @Public() path through three global guards, a real query and DTO
+          # mapping. Chosen because it is public and correct on an EMPTY
+          # database, so it needs no seeding.
+          curl -fsS http://127.0.0.1:3000/api/v1/products | tee /tmp/products.json
+          grep -q '"data":\[\]' /tmp/products.json
+          grep -q '"meta"' /tmp/products.json
+
+      # C-D8. A unit test proves the branch; only this proves the route is
+      # absent from the shipped artifact.
+      - name: C-D8 - the API docs are not published in production
+        run: |
+          set -euo pipefail
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/docs)
+          echo "GET /api/docs -> $CODE"
+          test "$CODE" = "404"
+
+      # DoD 5. Proves ConfigService -> SchedulerRegistry wiring inside the real
+      # image; today that path is covered only by unit tests, and a deployment
+      # whose cron silently never registered would look healthy on every probe.
+      #
+      # Deliberately NOT asserting the absence of error logs: a sweep may tick
+      # during this window and fail against the dummy provider key, which is
+      # harmless but would make such an assertion flaky.
+      - name: Maintenance cron registered inside the image
+        run: |
+          set -euo pipefail
+          docker logs smoke-app > /tmp/app.log 2>&1
+          grep -q 'Scheduled order-expiry' /tmp/app.log
+          grep -q 'Scheduled maintenance-purge' /tmp/app.log
+          grep -q 'Scheduled payment-reconciliation' /tmp/app.log
+
+      # C-D3, container half, and the strongest available evidence for the
+      # liveness split: liveness does not depend on the database, readiness
+      # does, and Prisma reconnects without a restart.
+      #
+      # This is the highest-flake-risk assertion in the phase, so every wait is
+      # bounded polling with a generous ceiling. If it proves genuinely
+      # unstable it may be downgraded to the unit-level equivalent in
+      # health.controller.spec.ts -- but ONLY as the spec authorises, WITH the
+      # downgrade and its evidence recorded in the closeout. It is never
+      # quietly deleted.
+      - name: C-D3 - liveness survives a database outage, readiness does not
+        run: |
+          set -euo pipefail
+          docker stop "$PGHOST_CONTAINER"
+
+          # Liveness must stay 200 with no database at all.
+          curl -fsS http://127.0.0.1:3000/health/live >/dev/null
+          echo 'liveness still 200 with the database down'
+
+          # Readiness must become 503, polled because the pool may need a
+          # moment to notice.
+          for i in $(seq 1 20); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/health)
+            echo "attempt ${i}: /health -> ${CODE}"
+            [ "$CODE" = "503" ] && break
+            sleep 2
+          done
+          test "$CODE" = "503"
+
+          # And liveness is STILL fine at the moment readiness is failing --
+          # the assertion that actually names the property.
+          curl -fsS http://127.0.0.1:3000/health/live >/dev/null
+
+          docker start "$PGHOST_CONTAINER"
+          for i in $(seq 1 40); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/health)
+            echo "recovery attempt ${i}: /health -> ${CODE}"
+            [ "$CODE" = "200" ] && break
+            sleep 3
+          done
+          test "$CODE" = "200"
+          echo 'readiness recovered without a restart'
+
+      # C-D9. Exit 0 is the assertion that carries the content. `docker stop`
+      # sends SIGTERM, waits, then SIGKILLs -- so a container that IGNORED
+      # SIGTERM would still "stop", with exit code 137. Asserting merely that
+      # it stopped would pass against a process with no handler at all.
+      - name: C-D9 - SIGTERM is handled, exit 0 within 10s
+        run: |
+          set -euo pipefail
+          START=$(date +%s)
+          docker stop --timeout 10 smoke-app
+          ELAPSED=$(( $(date +%s) - START ))
+          CODE=$(docker inspect -f '{{.State.ExitCode}}' smoke-app)
+          echo "exit=${CODE} elapsed=${ELAPSED}s"
+          test "$CODE" = "0"
+          test "$ELAPSED" -lt 10
+
+      # A smoke test that fails without logs is a smoke test nobody can fix,
+      # and this job is the one place in CI where the failure is three layers
+      # away from the assertion. `if: failure()` so it runs on any failing step
+      # above, including a health status that never reached healthy.
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          echo '===== app logs ====='
+          docker logs smoke-app 2>&1 || echo '(no app container)'
+          echo '===== app health state ====='
+          docker inspect -f '{{json .State.Health}}' smoke-app 2>&1 || echo '(none)'
+          echo '===== app exit code ====='
+          docker inspect -f '{{.State.ExitCode}}' smoke-app 2>&1 || echo '(none)'
+          echo '===== postgres logs ====='
+          docker logs "$PGHOST_CONTAINER" 2>&1 || echo '(no postgres container)'
+          echo '===== containers ====='
+          docker ps -a
+          echo '===== configured healthcheck ====='
+          docker inspect -f '{{json .Config.Healthcheck}}' "$IMAGE:smoke-runtime" 2>&1 || echo '(none)'
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker rm -f smoke-app smoke-abort-cd5 smoke-abort-cd6 smoke-abort-cd7 \
+            "$PGHOST_CONTAINER" 2>/dev/null || true
+          docker network rm "$NETWORK" 2>/dev/null || true
 
   bootstrap:
     name: Compiled admin bootstrap
