@@ -1610,7 +1610,7 @@ three instruments are not interchangeable (spec §9.2.3). Chain it into the
 
 **Trap 2 — do not delete the generated client's own query engine.**
 `node_modules/.prisma/client/libquery_engine-linux-musl-openssl-3.0.x.so.node`
-(16.7 MB) is what the client loads. `@prisma/engines` holds a *duplicate* of it
+(16.7 MiB by `du`, 17,556,136 bytes) is what the client loads. `@prisma/engines` holds a *duplicate* of it
 alongside the schema engine; that duplicate is what goes. Deleting the generated
 one breaks every query, and Step 10's mutation is what proves the assertion would
 notice.
@@ -1650,8 +1650,9 @@ docker run --rm --entrypoint sh ecommerce-backend:prepruned -c \
   'du -sh node_modules/prisma node_modules/@prisma/* 2>/dev/null | sort -rh; echo "--- engine binaries ---"; find node_modules -type f \( -name "*.so.node" -o -name "schema-engine*" \) -exec du -h {} \;'
 ```
 
-Confirm the spec §9.2.3 table against what you see: `node_modules/prisma` ≈50 MB,
-`@prisma/engines` ≈35 MB holding **both** `schema-engine-*` and a duplicate
+Confirm the spec §9.2.3 table against what you see (the command above is `du`, so
+these are **MiB**): `node_modules/prisma` ≈50, `@prisma/engines` ≈35 holding
+**both** `schema-engine-*` and a duplicate
 `libquery_engine-*.so.node`, and `node_modules/.prisma/client/` holding its **own**
 `libquery_engine-*.so.node`. **If the layout differs from the table, stop and
 report** — the removal set is derived from this layout and nothing else.
@@ -2558,7 +2559,7 @@ These must come **before** the long-running container starts, so a failure is ch
 python -c "import yaml,sys; d=yaml.safe_load(open('.github/workflows/ci.yml')); print('jobs:', list(d['jobs'])); print('docker steps:', len(d['jobs']['docker']['steps']))"
 ```
 
-Expected: the five original jobs still listed (`build`, `e2e`, `docker`, `bootstrap`) with `docker` carrying the new steps. **Confirm no other job changed:**
+Expected: the **four** original jobs still listed — `build`, `e2e`, `docker`, `bootstrap` — with `docker` carrying the new steps. (This line said "five" and then listed four; the repository has four, measured in T7.) **Confirm no other job changed:**
 
 ```bash
 git diff .github/workflows/ci.yml | grep '^-' | grep -v '^---'
@@ -2594,7 +2595,7 @@ Each mutation is made, the smoke sequence re-run locally, the failing assertion 
 npm run lint:ci && npm run build && npm test && npm run test:e2e
 ```
 
-Then push the branch and read the actual CI result. **All five jobs must pass.** If the smoke job fails on networking, that is R1 — fix the network wiring, do not convert it to a service container.
+Then push the branch and read the actual CI result. **All four jobs must pass.** If the smoke job fails on networking, that is R1 — fix the network wiring, do not convert it to a service container.
 
 - [ ] **Step 13: Commit**
 
@@ -2636,7 +2637,7 @@ EOF
 - `docker stop` → exit 0 in < 10s.
 - C-D3's outage/recovery sequence passes with bounded polling only, no fixed sleeps as waits.
 - Diagnostics collected via `if: failure()`; teardown via `if: always()`.
-- All five CI jobs green on the pushed branch.
+- All **four** CI jobs green on the pushed branch (`build`, `e2e`, `docker`, `bootstrap`). **NOT VERIFIED in this execution:** nothing was pushed, so this criterion is outstanding. The `docker` job's own step bodies were executed locally, which is not a GitHub Actions result. Likewise spec **DoD 21's "required on pull requests"**: the job key stays `docker` so an existing branch-protection rule needs no change, but whether it *is* a required check is a repository setting outside the tree and is **NOT VERIFIED** either.
 
 **Independent review focus:**
 1. Does any wait use a bare `sleep` as its *mechanism* rather than as a poll interval? A timeout must be a failure, never a silent skip.
@@ -2682,7 +2683,7 @@ npm run test:e2e 2>&1 | tail -5
 
 Record the **actual** suite and test counts from this run. The Phase 5 baseline was unit 33/430 and e2e 28/337; the real Phase 6 numbers are higher and must come from this output. **Do not reprint the baseline as if measured.**
 
-Also record: the OpenAPI inventory count (21 → likely 22 with `/health/live`), the CI run URL with all five jobs green, and for each of C-D1…C-D11 the mutation applied and the assertion that failed.
+Also record: the OpenAPI inventory count with its unit named (**measured in T7: 25 operation entries across 22 distinct paths** — the assertion pins `METHOD /path` operations, so 25 is the number it enforces and 22 is the path count the earlier "likely 22" was reaching for; both are real and they measure different things), the CI result for all **four** jobs, and for each of C-D1…C-D11 the mutation applied and the assertion that failed.
 
 - [ ] **Step 2: Update the README status block**
 
@@ -2927,7 +2928,13 @@ Confirm the scope locks mechanically:
 ```bash
 git diff --stat master..HEAD -- prisma/                     # must be EMPTY (DoD 22)
 git diff master..HEAD -- package.json package-lock.json      # must be EMPTY (DoD 23)
-git diff --stat master..HEAD -- src/modules/maintenance/ src/modules/payments/   # must be EMPTY
+git diff --stat master..HEAD -- src/modules/maintenance/   # must be EMPTY
+# EXPECTED, not a breach: payments.module.spec.ts +5 only. T2/T3 made
+# TRUST_PROXY_HOPS and CORS_ORIGIN production-required, so this test's production
+# fixture had to gain both -- otherwise its "fake is rejected under production"
+# assertion would have been rejected for the WRONG reason and passed VACUOUSLY.
+# No production file, no provider, no webhook, no markPaid(). DoD 24 holds.
+git diff --stat master..HEAD -- src/modules/payments/
 grep -rn 'OrderStatus.PAID' src/ | grep -v spec             # markPaid() only (DoD 24)
 git diff --stat master..HEAD                                 # review every file against the plan's file map
 ```
@@ -2974,7 +2981,7 @@ EOF
 **Acceptance criteria:**
 - `README.md:32` checked off; runbook covers release order, probe assignment, the hop-count rule, shutdown caveats, `TZ=UTC`, and the database boundary.
 - The README env table does not present `1` as universal or recommended (DoD 15c).
-- Two `Owner: Phase 6` entries closed by shipping with their caveats, one sharpened with the `5N/minute` number and the fail-open/fail-closed requirement, five added. **No entry deleted** (DoD 25).
+- Two `Owner: Phase 6` entries closed by shipping with their caveats, one sharpened with the `5N/minute` number and the fail-open/fail-closed requirement, and **six** added (§19.3 items 4–9 — Step 7 says "six, not five", and this line used to say five). **Measured outcome in T7: seven new headings**, because entry 3's "sharpening" had no existing entry to sharpen and was added instead — see that entry's own first paragraph. **No entry deleted** (spec DoD 26).
 - `CLAUDE.md` Phase 6 section present; deferred summary updated.
 - All 31 DoD items walked, with evidence or an honest downgrade.
 - Scope locks verified mechanically: zero migrations, zero dependency changes, no maintenance/payments diff.
@@ -3033,6 +3040,11 @@ EOF
 
 **Every item has an owner and a verifier. No requirement is unassigned.**
 
+**Numbering note (measured in T7):** rows 25–29 of this table are **rotated** relative
+to spec §20 — this table's 25–28 are the spec's 26–29, and this table's 29 is the
+spec's 25. All seven items appear exactly once, so nothing is unassigned or
+unverified; **the spec's numbering is authoritative** where the two disagree.
+
 ---
 
 ## Contradictions found between the spec and the repository
@@ -3043,7 +3055,7 @@ Reported rather than resolved silently, per the Global Constraints.
 
 **2. One pre-existing test breaks, by design.** `src/config/env.validation.spec.ts:246` — *"accepts the stripe provider under `NODE_ENV=production` when a key is set"* — asserts `error` is `undefined` while building its environment from `validEnv()`, which supplies neither `TRUST_PROXY_HOPS` nor `CORS_ORIGIN`. Both production guards break it. Repaired in T2 Step 2 via a `validProdEnv()` helper that T3 extends. The neighbouring test at :238 survives untouched, because `abortEarly: false` keeps `PAYMENT_PROVIDER` in the message its `toContain` checks. The spec does not mention this collision.
 
-**3. The spec does not mention the OpenAPI inventory.** `test/swagger.e2e-spec.ts` asserts a hand-maintained endpoint list, currently 21/21. `/health/live` is a new documented endpoint, so that count very likely becomes 22. Handled in T1 Step 14 — update the inventory, never relax the assertion. DoD 29's "OpenAPI 21/21" should read 22/22 once T1 lands; T7 reports the measured value.
+**3. The spec does not mention the OpenAPI inventory.** `test/swagger.e2e-spec.ts` asserts a hand-maintained endpoint list. `/health/live` is a new documented endpoint, so the count moves. Handled in T1 Step 14 — update the inventory, never relax the assertion. **Measured in T7: 25 operation entries across 22 distinct paths.** The prediction of "22" was counting distinct paths while the assertion pins `METHOD /path` operations; the stale figure lived in spec **DoD 25** (not DoD 29) and in §17.4, both corrected in T7 with the instrument named.
 
 **4. G5 was misdiagnosed, and the spec's own evidence column proved it.** Spec §4.2's G5 row asserted *"the `prisma` CLI is absent from the runtime image"*, citing as evidence that `prisma` is a devDependency and the runtime stage runs `npm ci --omit=dev`. That is a deduction from the manifest, and the built image contradicts it: `prisma` is an optional *peer* of the production `@prisma/client`, so the lockfile marks it `devOptional` and `--omit=dev` keeps it, along with `@prisma/engines` and the schema engine inside it. Measured during T4, not predicted. The gap is now stated in three parts with three owners — (a) no migration artifact ships → T4; (b) the CLI and schema engine are present → **T4a**; (c) the non-contract `.prisma` layout → deferred. **The general lesson, recorded because it outlives this phase: a `devDependencies` declaration is not an absence guarantee when a production dependency peer-depends on the same package, and four green verification gates did not notice.**
 

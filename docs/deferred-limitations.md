@@ -15,7 +15,37 @@ saying so here.
 
 ## Security
 
-### Rate limiting keys on `req.ip`, with no trusted-proxy configuration
+### ~~Rate limiting keys on `req.ip`, with no trusted-proxy configuration~~ — CLOSED by Phase 6
+
+**Closed by shipping, not by deletion.** `TRUST_PROXY_HOPS` sets Express's
+`trust proxy` in `configureApp()`, and `ThrottlerGuard.getTracker()` returns
+`req.ip`, so that one setting governs every bucket — there is no custom tracker.
+
+It is a **numeric hop count, never `true`**: `true` takes the leftmost
+`X-Forwarded-For` entry, which is attacker-supplied, and would make the 5/min
+login limit unlimited. A number counts from the right, skipping exactly the
+proxy-appended entries.
+
+**Required under `NODE_ENV=production` with no default**, because neither default
+is safe — `0` behind a proxy collapses every client into one bucket, and a value
+above the real chain depth is a silent bypass. The deployer states the topology,
+which is what the original entry asked for.
+
+**One hop is the reference topology for the tests, not a universal value.** It
+must be set per deployment to the number of proxies that will append to
+`X-Forwarded-For`, and **too high is the dangerous direction** — too low degrades
+availability loudly, too high removes the control silently.
+
+Controls C-D1 and C-D2 are recorded failing against `trust proxy: true` and
+against no setting at all, respectively. C-D1's vacuity was checked explicitly: a
+single-entry `X-Forwarded-For` cannot discriminate the two settings, so the
+control uses a two-entry header.
+
+**The original entry is preserved verbatim below, per this file's no-deletion rule.
+It describes the PRE-Phase-6 state: its present tense and its `Owner: Phase 6` line
+are historical, not current.**
+
+---
 
 **Owner: Phase 6 (deployment) — must be settled before the API sits behind a proxy.**
 
@@ -107,7 +137,50 @@ accumulates faster than it purges. A saturated batch logs at `warn` naming the
 table, which makes the condition **visible, not impossible**. Raise the batch
 size or the cadence when that warning appears.
 
-### The runtime image's Prisma setup is undeclared and untested
+### The runtime image's Prisma setup is undeclared and untested — PARTLY CLOSED by Phase 6
+
+**Closed by shipping:** CI now **runs** the image rather than only building it —
+it migrates a throwaway database from a `migrate` image, serves, reports healthy
+through Docker's own health state, and stops with exit 0. The migration path ships
+as an artifact built from the same Dockerfile and the same commit as the server,
+so a migration can no longer be applied from a different checkout than the running
+image. The serving image carries no Prisma migration CLI **and no schema engine**.
+
+**That took an explicit prune, and the reason is the generalisable part.**
+`npm ci --omit=dev` did **not** achieve it: `prisma` is an optional *peer*
+dependency of the production `@prisma/client`, so the lockfile marks it
+`devOptional`, and `--omit=dev` omits only `dev`. Measured at **6.19.3 inside the
+built image** before the prune existed. `@prisma/engines` rode in the same way,
+carrying the schema engine that actually applies migrations. **The lesson outlives
+this phase: a `devDependencies` declaration is not an absence guarantee when a
+production dependency peer-depends on the same package** — and four green
+verification gates did not notice.
+
+**Precisely what that does and does not establish:** it is a **tooling boundary,
+not a capability boundary**. The standard Prisma migration CLI and the schema
+engine are absent, so `prisma migrate deploy` cannot be invoked there. It does
+**not** prove schema mutation is impossible — `PrismaService` extends
+`PrismaClient`, which exposes `$executeRaw` and `$executeRawUnsafe`, and the
+database role is whatever `DATABASE_URL` supplies. No DDL exists in `src/` today
+(the only raw SQL is the health check's `SELECT 1`), so it is a latent capability
+rather than an exercised one. Closing it needs a least-privilege application role
+distinct from the migration role — a database administration decision, out of
+scope for Phase 6. **Trigger:** a real deployment exists whose database
+credentials this project controls.
+
+**Still open:** the runtime stage copies the generated client via
+`node_modules/.prisma`, a layout Prisma does not contract — and **the prune now
+depends on that layout**, because the generated client's own copy of the query
+engine is what survives when `@prisma/engines` is removed. That raises the stakes
+without changing the trigger: a Prisma major upgrade that relocates the generated
+engine would break the serving image's **query path**, not merely its tidiness.
+**Owner: unscheduled. Trigger: a Prisma major upgrade.**
+
+**The original entry is preserved verbatim below, per this file's no-deletion rule.
+It describes the PRE-Phase-6 state: its present tense and its `Owner: Phase 6` line
+are historical, not current.**
+
+---
 
 **Owner: Phase 6 (deployment).**
 
@@ -125,6 +198,137 @@ Compounding both: CI **builds** the image but never **runs** it, so "the image
 builds" is currently the only assurance — it is not evidence that the container
 starts, connects, and serves. A smoke test that boots the image against a
 throwaway database belongs with the deployment work.
+
+### Redis-backed throttler storage is deferred, with a trigger rather than a date
+
+**Owner: unscheduled. Trigger: a second replica.**
+
+**Recorded here for the first time in Phase 6.** The decision itself predates this
+file's Phase 6 pass — it lived only in `CLAUDE.md`'s tech-stack notes, which is
+exactly the invisibility this file exists to fix.
+
+Rate limiting uses `@nestjs/throttler`'s **in-memory** storage. At Phase 6's
+topology — a **single instance** — that is *correct* rather than a compromise: one
+process, one bucket store, no coordination to get wrong.
+
+What changes with more than one: with `N` replicas and in-memory storage the
+effective limit is **`N × limit` per client**, because buckets do not share. The
+login control degrades from 5/minute to **5N/minute** — weakened, not eliminated.
+
+**The trigger is a second replica, not a date.** And whoever adds Redis must
+decide, explicitly and in writing, between **fail-open** (storage unreachable →
+rate limiting silently disappears, exactly when infrastructure is degraded and
+probing is most likely) and **fail-closed** (a cache outage becomes a total API
+outage). Neither is right in general. **That choice is the work, not the wiring.**
+
+### Shutdown drains neither in-flight requests nor in-flight sweeps
+
+**Owner: unscheduled. Trigger: a deployment that cannot tolerate a dropped
+request or a stalled maintenance job during a rollout.**
+
+`SIGTERM` is handled and the process exits **0** — CI asserts that within 10s on an
+idle container. Two things are *not* proven:
+
+- **In-flight HTTP requests are not proven to drain under load.** The assertion is
+  made against an idle container, so a request in flight at the moment of
+  `SIGTERM` may be lost. Nest's shutdown hooks run, but no test holds an open
+  request across the signal.
+- **A container stopped mid-sweep may be killed before the maintenance runner's
+  `finally` releases its lease.** The lease then stays held until it lapses — up to
+  `MAINTENANCE_LEASE_SECONDS` (default 300s) — during which that job reports
+  `skipped: lease-held`. This is **safe**: a lapsed lease is exactly the recovery
+  path designed for a crashed holder, and no work is lost or duplicated. It is a
+  latency cost, not a correctness one.
+
+### Liveness and readiness have different semantics, and the probe assignment must be honoured
+
+**Owner: whoever configures the orchestrator. Trigger: none — this is a standing
+operational constraint.**
+
+`/health/live` is process-only: synchronous, no I/O, no database. `/health` queries
+the database and returns **503** when it is unreachable. They are not
+interchangeable, and the asymmetry is load-bearing:
+
+- **Point liveness and the container `HEALTHCHECK` at `/health/live`.**
+- **Point readiness at `/health`.**
+- **Never point liveness at `/health`.** `PrismaService.onModuleInit()` exits the
+  process when `$connect()` fails, so a restart cannot succeed while the database
+  is down — the restart actively prevents the reconnection that the running
+  container would have made on its own through Prisma's pool. A transient outage
+  becomes an unbootable crash loop.
+
+Nothing in the application can enforce this; it is a deployment-time choice, which
+is why it is recorded as a limitation rather than a guard.
+
+### The scheduler registers crons before the HTTP port is bound
+
+**Owner: unscheduled. Trigger: a job whose first tick must not precede readiness.**
+
+`MaintenanceScheduler.onModuleInit()` registers every cron through
+`SchedulerRegistry`, and `onModuleInit` runs **before** `app.listen()`. A tick can
+therefore fire while the port is still binding. Harmless today — the sweeps do not
+depend on the HTTP server, and the lease plus the per-order CAS make a concurrent
+tick safe — but it means "the process is scheduling work" and "the process is
+serving traffic" are not the same instant, and a job that ever needed readiness
+first would have to say so.
+
+### `TRUST_PROXY_HOPS` is verifiable only through throttling behaviour
+
+**Owner: unscheduled. Trigger: adding request logging.**
+
+No request logging exists, so there is **no direct log signal** for the resolved
+client IP or the hop count in effect. The boot log states the configured number,
+but nothing afterwards shows what `req.ip` actually resolved to per request. A
+misconfigured hop count is therefore observable only indirectly:
+
+- **Too low** collapses clients into one bucket — loud, because unrelated callers
+  start seeing each other's 429s.
+- **Too high** is a silent bypass — the limit simply stops applying, and nothing
+  logs that it did.
+
+**Too high is the dangerous direction and the one with no signal.** Until request
+logging exists, the only way to confirm the setting is to reason about the
+topology and test the throttle from a known position in the chain.
+
+### The serving image's lack of migration tooling is a tooling boundary, not a capability boundary
+
+**Owner: unscheduled. Trigger: a real deployment whose database credentials this
+project controls.**
+
+Cross-referenced from the runtime-image entry above, and repeated here because it
+is the claim most likely to be overstated by someone skimming.
+
+C-D10 proves the standard Prisma migration CLI and the schema engine are **absent**
+from the serving image — and, just as importantly, that `npm ci --omit=dev` alone
+did **not** make them so. It does **not** prove schema mutation from a serving
+container is impossible: `$executeRaw` and `$executeRawUnsafe` remain on the
+client, and the database role is whatever `DATABASE_URL` supplies. They are unused
+for DDL today; the only raw SQL in `src/` is the health check's `SELECT 1`.
+
+Closing this needs a **least-privilege application role distinct from the
+migration role**, which is a database administration decision with its own
+migration story for existing deployments. **No document produced by Phase 6 may
+state that schema mutation from a serving container is impossible.**
+
+### The runtime image still carries the migration SQL it cannot apply
+
+**Owner: unscheduled. Trigger: a measured need to shrink the serving image, or a
+deployment whose threat model objects to the schema being readable in the
+container.**
+
+`COPY prisma ./prisma` puts `schema.prisma` and all five migration directories into
+the serving image. They are **data, not tooling** — nothing in the pruned image can
+execute them — but two consequences follow:
+
+- The schema and its full migration history are **readable from a serving
+  container**.
+- They inflate the image for no purpose the generated client is **known** to need: it
+  resolves its own schema copy under `node_modules/.prisma/client/` (verified by
+  inspection, not by building without the `COPY`).
+
+Removing them is a separate change with its own verification, deliberately **not**
+bundled into the migration-tooling prune, because the prune's safety argument is
+about engine binaries and would not transfer.
 
 ### The admin catalog write surface is unreachable on a fresh database without a direct database insert
 

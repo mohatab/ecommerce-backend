@@ -424,7 +424,7 @@ variable then is a one-line change made for a real reason. Not inventing it now 
 the smallest correct design.
 
 Verified safe (§4.3): `swagger.e2e-spec.ts` constructs its own document and never
-requests the route, so the 21/21 OpenAPI inventory assertion is unaffected. No test
+requests the route, so the OpenAPI inventory assertion is unaffected. No test
 anywhere references `/api/docs`.
 
 The gate is asserted by a negative control in the container, not just in a unit
@@ -507,8 +507,8 @@ asserted the opposite for an entire phase, and four green verification gates did
 not notice.
 
 The scope is worse than the CLI alone. The runtime image also carried
-`@prisma/engines` (35.6 MB), containing
-`schema-engine-linux-musl-openssl-3.0.x` (18.7 MB) — **the binary that actually
+`@prisma/engines` (35.6 MiB by `du`), containing
+`schema-engine-linux-musl-openssl-3.0.x` (18.7 MiB) — **the binary that actually
 applies migrations** — plus a *duplicate* query engine. The serving image shipped
 both the documented command and the engine behind it.
 
@@ -1111,9 +1111,14 @@ image unproven — is the whole reason §10 exists.
 
 ### 17.4 No regression
 
-All existing gates stay green with the new tests included: `lint:ci`, `build`,
-**33 unit suites / 430 tests**, **28 e2e suites / 337 tests**, OpenAPI inventory
-**21/21**. A `TRUST_PROXY_HOPS` default of `0` outside production keeps every
+All existing gates stay green with the new tests included. The Phase 5 baseline was
+`lint:ci`, `build`, **33 unit suites / 430 tests**, **28 e2e suites / 337 tests**,
+OpenAPI inventory **21/21**. **Measured at the Phase 6 closeout (T7): 33 unit suites
+/ 447 tests, 29 e2e suites / 347 tests, and an OpenAPI inventory of 25 operation
+entries across 22 distinct paths.** The inventory assertion pins `METHOD /path`
+operations, so **25** is the number it enforces; 22 is the distinct-path count. The
+two are different instruments on the same document and must not be quoted
+interchangeably. A `TRUST_PROXY_HOPS` default of `0` outside production keeps every
 existing e2e suite byte-identical in behaviour; the full suite passing unchanged is
 the evidence for that, not an argument.
 
@@ -1223,6 +1228,12 @@ behaviour.
    `5N/minute` login degradation, a second replica as the trigger, and the explicit
    requirement that whoever adds Redis decides fail-open vs fail-closed and records
    it.
+
+   **Correction, measured in T7: no throttler-storage entry existed in
+   `deferred-limitations.md`** — the decision lived only in `CLAUDE.md`'s Tech Stack,
+   which is exactly the invisibility that file exists to fix. The entry was therefore
+   **added** carrying this content and labelled as first recorded in Phase 6. The file
+   gains **seven** new headings, not six; DoD 26's "six new" counts items 4–9 only.
 
 **Newly added:**
 
@@ -1349,11 +1360,18 @@ Each item is a pass/fail check, not a judgement.
 24. No new route beyond `/health/live`. No change to `markPaid()`'s sole-writer
     status, to any sweep, or to any lease logic.
 25. `lint:ci` clean, `build` clean, unit **≥ 33 suites / 430**, e2e **≥ 28 suites /
-    337**, OpenAPI **21/21** — all green, new tests included.
+    337**, OpenAPI inventory intact — all green, new tests included. **Measured at
+    the T7 closeout: unit 33 suites / 447 tests, e2e 29 suites / 347 tests, OpenAPI
+    25 operation entries across 22 distinct paths.** The floors above are the
+    Phase 5 baseline and are not to be reprinted as a result. The inventory
+    assertion pins `METHOD /path` operations, which is why the enforced figure is
+    **25** rather than the 22 distinct paths.
 26. `deferred-limitations.md`: entries 1 and 2 of §19.3 closed by shipping with
     their stated caveats, entry 3 sharpened, entries 4–**9** added (**six** new
     entries — item 9, the migration SQL that stays in the serving image, arrived
-    with the §9.2 amendment). **No entry deleted.**
+    with the §9.2 amendment). **No entry deleted.** **Measured in T7: seven new
+    headings**, because entry 3 had no existing entry to sharpen and was added
+    (see §19.3 item 3's correction). The "six" above counts items 4–9 only.
 27. `README.md:32` checked off, with a release runbook covering §9.4's order,
     §6.5's probe assignment, §5.2's hop-count rule, and §13.4's shutdown caveats.
 28. `CLAUDE.md` gains a Phase 6 section recording the non-obvious rules: the hop
