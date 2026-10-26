@@ -66,6 +66,7 @@ describe('Maintenance concurrency (e2e)', () => {
   let tokens: TokenService;
   let provider: FakePaymentProvider;
   let runner: MaintenanceRunnerService;
+  let expiryService: OrderExpiryService;
   let products: ProductsService;
   let user: User;
   let token: string;
@@ -78,6 +79,9 @@ describe('Maintenance concurrency (e2e)', () => {
     tokens = app.get(TokenService);
     provider = app.get<FakePaymentProvider>(PAYMENT_PROVIDER);
     runner = app.get(MaintenanceRunnerService);
+    // The same instance the runner's job map closes over, which is why a spy
+    // on it intercepts the run without any production seam.
+    expiryService = app.get(OrderExpiryService);
     products = app.get(ProductsService);
 
     await app.listen(0);
@@ -336,27 +340,154 @@ describe('Maintenance concurrency (e2e)', () => {
     await assertStockConserved(prisma, product.id, 10);
   });
 
-  it('twenty concurrent admin triggers produce one run and no 5xx', async () => {
+  /**
+   * Spec §10.1: "A caller arriving WHILE A RUN IS IN FLIGHT receives 409 and
+   * starts nothing. This is what prevents an admin from launching twenty
+   * concurrent sweeps and exhausting the connection pool."
+   *
+   * That is the claim, and it is about CONCURRENCY. An earlier version of this
+   * test fired twenty triggers with `Promise.all` and asserted exactly one 200
+   * and nineteen 409s. **That assertion was stronger than the contract and it
+   * failed on CI** (run 40351531044: four 200s), because the runner releases
+   * the lease in its `finally` and `release()` sets `expiresAt` to the EPOCH --
+   * so a completed run leaves the lease immediately free. The number of 200s in
+   * a burst is therefore a function of arrival spread versus run duration, not
+   * of lease correctness: measured in a throwaway harness against real
+   * PostgreSQL (not in this suite), the same twenty-way burst yields 1 success
+   * when it arrives inside one run and progressively more as the arrivals
+   * spread past each run's end, while the maximum number of SIMULTANEOUS
+   * holders stays 1 throughout. Twenty 200s spread over twenty sequential runs
+   * would violate nothing.
+   *
+   * So this test no longer races the clock. It pins the first run OPEN and
+   * issues the other nineteen while that run is definitely still inside
+   * `sweep()` -- i.e. after `acquire()` returned 'acquired' and before the
+   * `finally` released it. Now "nineteen 409s" is a property of the lease
+   * rather than of the machine, and it fails on a lease that does not exclude.
+   *
+   * The seam is the INJECTED SERVICE, not a production hook:
+   * `MaintenanceRunnerService`'s job map holds `() => expiry.sweep()`, which
+   * resolves `sweep` on the instance at call time, so a spy on the instance
+   * intercepts it. The spy awaits a gate and then calls THROUGH to the real
+   * sweep, so the order still expires and the stock assertions below still
+   * exercise real behaviour. Nothing in `src/` knows this test exists.
+   */
+  it('refuses every trigger arriving while a run is in flight, and runs once', async () => {
     const product = await createProduct(prisma, category.id, {
       stockQuantity: 10,
     });
     const order = await pendingOrder([{ product, quantity: 3 }], past());
 
-    const responses = await Promise.all(
-      Array.from({ length: 20 }, () =>
-        request(app.getHttpServer())
-          .post(
-            `/api/v1/admin/maintenance/${MaintenanceJobName.ORDER_EXPIRY}/run`,
-          )
-          .set('Authorization', `Bearer ${adminToken}`),
-      ),
-    );
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    let entered!: () => void;
+    const insideSweep = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
 
-    const statuses = responses.map((response) => response.status);
+    // Observed directly rather than inferred: if the lease ever admitted two
+    // runs at once, `active` would reach 2 and `peakActive` would record it.
+    let active = 0;
+    let peakActive = 0;
 
-    expect(statuses.filter((status) => status >= 500)).toEqual([]);
-    expect(statuses.filter((status) => status === 200)).toHaveLength(1);
-    expect(statuses.filter((status) => status === 409)).toHaveLength(19);
+    const realSweep = expiryService.sweep.bind(expiryService);
+    let parked = false;
+    const sweepSpy = jest
+      .spyOn(expiryService, 'sweep')
+      .mockImplementation(async () => {
+        active += 1;
+        peakActive = Math.max(peakActive, active);
+
+        // ONLY the first entry parks, and that is load-bearing for the
+        // negative control rather than a convenience. Parking every entry was
+        // measured to DEADLOCK against a lease that does not exclude: all
+        // nineteen competitors enter sweep(), park on the same gate, their
+        // requests never return, `Promise.all` never resolves, and the control
+        // hangs instead of failing on the assertion that names the property.
+        // A later entry therefore runs straight through, so a regression
+        // surfaces as nineteen 200s on the assertion below.
+        const isFirst = !parked;
+        if (isFirst) {
+          parked = true;
+          entered();
+        }
+
+        try {
+          if (isFirst) {
+            await gate;
+          }
+          return await realSweep();
+        } finally {
+          active -= 1;
+        }
+      });
+
+    const trigger = (): request.Test =>
+      request(app.getHttpServer())
+        .post(
+          `/api/v1/admin/maintenance/${MaintenanceJobName.ORDER_EXPIRY}/run`,
+        )
+        .set('Authorization', `Bearer ${adminToken}`);
+
+    try {
+      // The holder. `.then()` is what SENDS it: supertest dispatches lazily --
+      // `RequestBase.prototype.then` calls `self.end(...)` (verified in
+      // superagent's request-base.js) -- so `trigger()` alone is inert and the
+      // next line is load-bearing, not decoration. Simplifying it to
+      // `const heldSettled = held;` makes `await insideSweep` below hang until
+      // jest's timeout with no clue why. Not awaited yet: it parks in sweep().
+      const held = trigger();
+      const heldSettled = held.then((response) => response);
+
+      // Barrier, not a sleep: the lease is now held and the run is open.
+      await insideSweep;
+      expect(active).toBe(1);
+
+      const competitors = await Promise.all(
+        Array.from({ length: 19 }, () => trigger()),
+      );
+      const competing = competitors.map((response) => response.status);
+
+      // Each competitor arrived strictly inside the first run, so every one of
+      // them must be a refusal. This equality comes FIRST deliberately: it is
+      // the assertion that names lease exclusion, and comparing the whole array
+      // reports any stray 200 (a second run admitted) or 500 (the fence
+      // rejecting a sibling run whose lease was released out from under it) in
+      // one diff. Measured against an acquire() with its `expiresAt` predicate
+      // removed: a mix of 500s and 200s, failing right here. The split varies
+      // with interleaving, so no fixed count is quoted.
+      expect(competing).toEqual(Array.from({ length: 19 }, () => 409));
+      // ...and it is the LEASE's refusal, not a Prisma error that
+      // HttpExceptionFilter also maps to 409. Asserted rather than inferred.
+      expect(competitors[0].body).toMatchObject({
+        statusCode: 409,
+        message: 'Maintenance job is already running',
+      });
+      expect(competing.filter((status) => status >= 500)).toEqual([]);
+      // None of them started a run: sweep() has still been entered once.
+      expect(sweepSpy).toHaveBeenCalledTimes(1);
+      expect(active).toBe(1);
+
+      releaseGate();
+      const holder = await heldSettled;
+
+      expect(holder.status).toBe(200);
+      expect(holder.body).toMatchObject({
+        job: MaintenanceJobName.ORDER_EXPIRY,
+        status: 'completed',
+      });
+      expect(sweepSpy).toHaveBeenCalledTimes(1);
+      // Never two at once, which is the whole claim of §10.1.
+      expect(peakActive).toBe(1);
+      expect(active).toBe(0);
+    } finally {
+      // finally, so a failed expectation above cannot leave the run parked and
+      // hang the suite, nor leak the spy into the next test.
+      releaseGate();
+      sweepSpy.mockRestore();
+    }
 
     expect(await statusOf(order.id)).toBe(OrderStatus.EXPIRED);
     expect(await stockOf(product.id)).toBe(10);
