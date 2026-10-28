@@ -335,7 +335,9 @@ about engine binaries and would not transfer.
 The heading is **not struck through**, because half of this entry is still
 open.
 
-**Closed by shipping:** `POST /api/v1/admin/categories` now exists
+**Closed by shipping, once an ADMIN exists** (the compiled bootstrap script is
+still required first, and it is not the API): `POST /api/v1/admin/categories`
+now exists
 (`src/modules/categories/admin-categories.controller.ts`), admin-only through a
 single class-level `@Roles(Role.ADMIN)`. A fresh database therefore accepts a
 product through the API alone: create a category, then create a product against
@@ -359,6 +361,16 @@ task.
 Two things this closure deliberately did **not** change: category deletion is
 still unimplemented, because it needs the orphan policy Phase 2 declined to
 invent, and `Product.category`'s `onDelete: Restrict` is untouched.
+
+And one consequence worth stating, because it needs no orphan policy and so is
+not excused by the argument above: **`CategoriesService.update()` also still has
+no route.** It ships, and is unit- and e2e-tested, but a mistyped `name` or
+`slug` cannot be corrected through the API — it is permanent, publicly visible in
+the catalog, and its unique value is consumed. `name` is also stored untrimmed,
+so `'Desks'` and `'Desks '` are two rows that render identically; both
+behaviours are pinned by tests rather than fixed, because changing either is a
+decision for whoever owns the catalog. A category write route for corrections is
+its own task.
 
 **The original entry is preserved verbatim below, per this file's no-deletion
 rule. It describes the state before the category route shipped.**

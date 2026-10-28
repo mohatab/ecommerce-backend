@@ -7,6 +7,7 @@ import { App } from 'supertest/types';
 import { createTestApp } from './helpers/create-test-app';
 import { truncateAll } from './helpers/truncate';
 import { createUser } from './factories/user.factory';
+import { TokenService } from '../src/modules/auth/token.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 
 interface CategoryItem {
@@ -60,29 +61,20 @@ describe('admin categories (e2e)', () => {
   const PATH = '/api/v1/admin/categories';
   const body = { name: 'Desks', slug: 'desks' };
 
-  const adminToken = async (): Promise<string> => {
-    const admin = await createUser(prisma, { role: Role.ADMIN });
-    return app.get(JwtService).sign(
-      { sub: admin.id, role: Role.ADMIN },
-      {
-        secret: realJwtSecret(),
-        algorithm: 'HS256',
-        expiresIn: '15m',
-      },
-    );
-  };
+  // Minted through the PRODUCTION signer, not hand-signed. A hand-rolled
+  // jwtService.sign() passes today because verifyAccessToken() checks only the
+  // secret and the algorithm, but it would keep passing after signAccessToken()
+  // gained a claim the guard then required -- so the suite would stop
+  // exercising the real token path exactly when that mattered.
+  const adminToken = async (): Promise<string> =>
+    app
+      .get(TokenService)
+      .signAccessToken(await createUser(prisma, { role: Role.ADMIN }));
 
-  const customerToken = async (): Promise<string> => {
-    const customer = await createUser(prisma, { role: Role.CUSTOMER });
-    return app.get(JwtService).sign(
-      { sub: customer.id, role: Role.CUSTOMER },
-      {
-        secret: realJwtSecret(),
-        algorithm: 'HS256',
-        expiresIn: '15m',
-      },
-    );
-  };
+  const customerToken = async (): Promise<string> =>
+    app
+      .get(TokenService)
+      .signAccessToken(await createUser(prisma, { role: Role.CUSTOMER }));
 
   // Local, like admin-products.e2e-spec.ts:101-113. Not extracted: extracting
   // would modify a shipped test file for no behavioural gain.
@@ -265,6 +257,30 @@ describe('admin categories (e2e)', () => {
         .expect(400);
 
       expect(await prisma.category.count()).toBe(0);
+    });
+
+    // Documented behaviour, pinned like case-sensitivity above and for the
+    // same reason: changing it is a decision the owner makes, not a drive-by.
+    // `name` is stored untrimmed, so these are two rows that render
+    // identically in the public catalog. @Matches(/\S/) only requires SOME
+    // non-whitespace; it does not trim. If trimming is ever added, this test
+    // fails and that is the intended signal.
+    it('stores name untrimmed, so "Desks" and "Desks " are distinct', async () => {
+      const token = await adminToken();
+
+      await request(app.getHttpServer())
+        .post(PATH)
+        .set('Authorization', `Bearer ${token}`)
+        .send(body)
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(PATH)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'Desks ', slug: 'desks-trailing-space' })
+        .expect(201);
+
+      expect(await prisma.category.count()).toBe(2);
     });
 
     it.each([['standing-desks'], ['desks2'], ['a'], ['a-b-c']])(
