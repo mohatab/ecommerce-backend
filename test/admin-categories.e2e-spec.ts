@@ -259,13 +259,26 @@ describe('admin categories (e2e)', () => {
       expect(await prisma.category.count()).toBe(0);
     });
 
-    // Documented behaviour, pinned like case-sensitivity above and for the
-    // same reason: changing it is a decision the owner makes, not a drive-by.
-    // `name` is stored untrimmed, so these are two rows that render
-    // identically in the public catalog. @Matches(/\S/) only requires SOME
-    // non-whitespace; it does not trim. If trimming is ever added, this test
-    // fails and that is the intended signal.
-    it('stores name untrimmed, so "Desks" and "Desks " are distinct', async () => {
+    // `name` is trimmed at the DTO boundary, before validation and before
+    // persistence. Two consequences are asserted here and two more are
+    // already covered above: a whitespace-only name still 400s (it trims to
+    // '' and fails @Matches(/\S/)), and case remains significant, because
+    // trimming normalises surrounding whitespace only — it is not a
+    // case-folding or collation change.
+    it('stores and returns the name trimmed', async () => {
+      const response = await request(app.getHttpServer())
+        .post(PATH)
+        .set('Authorization', `Bearer ${await adminToken()}`)
+        .send({ name: '  Desks  ', slug: 'desks' })
+        .expect(201);
+
+      expect((response.body as CategoryItem).name).toBe('Desks');
+
+      const row = await prisma.category.findFirstOrThrow();
+      expect(row.name).toBe('Desks');
+    });
+
+    it('returns 409 when a name differs only by surrounding whitespace', async () => {
       const token = await adminToken();
 
       await request(app.getHttpServer())
@@ -274,13 +287,50 @@ describe('admin categories (e2e)', () => {
         .send(body)
         .expect(201);
 
+      // Trims to the already-taken 'Desks', so the UNIQUE index rejects it and
+      // HttpExceptionFilter's P2002 map turns that into a 409 — the same path
+      // an exact duplicate takes, with no extra handling anywhere.
       await request(app.getHttpServer())
         .post(PATH)
         .set('Authorization', `Bearer ${token}`)
-        .send({ name: 'Desks ', slug: 'desks-trailing-space' })
+        .send({ name: ' Desks ', slug: 'desks-spaced' })
+        .expect(409);
+
+      expect(await prisma.category.count()).toBe(1);
+    });
+
+    it('still enforces the 200-character maximum after trimming', async () => {
+      const token = await adminToken();
+
+      // 200 characters plus surrounding whitespace trims to exactly 200.
+      await request(app.getHttpServer())
+        .post(PATH)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: `  ${'x'.repeat(200)}  `, slug: 'at-the-limit' })
         .expect(201);
 
-      expect(await prisma.category.count()).toBe(2);
+      // 201 characters is still too long once trimmed.
+      await request(app.getHttpServer())
+        .post(PATH)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: `  ${'x'.repeat(201)}  `, slug: 'over-the-limit' })
+        .expect(400);
+
+      expect(await prisma.category.count()).toBe(1);
+    });
+
+    it('rejects a non-string name rather than trimming it', async () => {
+      // The transform passes non-strings through untouched so @IsString is
+      // what rejects them; a bare `value.trim()` would throw a 500 instead.
+      for (const name of [42, ['Desks'], { value: 'Desks' }, null]) {
+        await request(app.getHttpServer())
+          .post(PATH)
+          .set('Authorization', `Bearer ${await adminToken()}`)
+          .send({ name, slug: 'desks' })
+          .expect(400);
+      }
+
+      expect(await prisma.category.count()).toBe(0);
     });
 
     it.each([['standing-desks'], ['desks2'], ['a'], ['a-b-c']])(

@@ -366,10 +366,18 @@ And one consequence worth stating, because it needs no orphan policy and so is
 not excused by the argument above: **`CategoriesService.update()` also still has
 no route.** It ships, and is unit- and e2e-tested, but a mistyped `name` or
 `slug` cannot be corrected through the API — it is permanent, publicly visible in
-the catalog, and its unique value is consumed. `name` is also stored untrimmed,
-so `'Desks'` and `'Desks '` are two rows that render identically; both
-behaviours are pinned by tests rather than fixed, because changing either is a
-decision for whoever owns the catalog. A category write route for corrections is
+the catalog, and its unique value is consumed. `name` **is** trimmed, as of an approved follow-up on
+2026-10-29, so `'Desks'` and `'Desks '` no longer produce two rows that render
+identically — the second returns 409 on the UNIQUE index. That holds **for every
+row created from here on, and is not retroactive**: no migration normalises
+existing rows, and with no update route a padded row already in a database stays
+and stays un-correctable. (Moot today, since this route has never been
+deployed.) Two narrower inputs are still accepted and worth knowing: uniqueness
+remains **case-sensitive** (a migration to change, so pinned by a test rather
+than fixed), and a name consisting only of **zero-width** characters survives
+both `trim()` and `/\S/`, so it is a 201 that renders blank in the catalog —
+pre-existing, not introduced by the trim, and fixing it would want the same
+treatment on `CreateProductDto.name`. A category write route for corrections is
 its own task.
 
 **The original entry is preserved verbatim below, per this file's no-deletion

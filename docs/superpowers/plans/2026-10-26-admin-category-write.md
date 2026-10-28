@@ -24,9 +24,9 @@
 
 Five input classes the spec implies that a naive implementation would get wrong. Each has a test in the task that owns the code.
 
-1. **Whitespace-only `name` (`"   "`).** `@IsNotEmpty()` accepts it; `@MinLength(1)` accepts it. Expected **400**. Pinned in Task 1 Step 1.
+1. **Whitespace-only `name` (`"   "`).** `@IsNotEmpty()` accepts it; `@MinLength(1)` accepts it. Expected **400**. Pinned in Task 1 Step 1. **Follow-up 2026-10-29:** `name` is now trimmed by a `@Transform` before validation, so `'   '` trims to `''` and fails `@Matches(/\S/)`; the expectation is unchanged, the mechanism is one step earlier.
 2. **Slug boundary forms.** `-desks`, `desks-`, `a--b`, `Desks`, `my desks`, `""` must each be **400** — the regex rejects all six, but only a test proves the regex is wired to the field. Pinned in Task 1 Step 1.
-3. **Case-sensitive uniqueness.** `"Desks"` then `"desks"` both return **201**, because these are plain PostgreSQL `@unique` columns. A reader expects a 409. Pinned in Task 1 Step 1 as the *documented* behaviour, so a future case-folding change breaks a test rather than surprising someone.
+3. **Case-sensitive uniqueness.** `"Desks"` then `"desks"` both return **201**, because these are plain PostgreSQL `@unique` columns. A reader expects a 409. Pinned in Task 1 Step 1 as the *documented* behaviour, so a future case-folding change breaks a test rather than surprising someone. Trimming (follow-up 2026-10-29) does **not** change this — it normalises surrounding whitespace only. The sibling case, `'Desks'` versus `'Desks '`, *was* pinned as distinct and is now a **409** instead; that pin was written as a tripwire ("if trimming is ever added, this test fails and that is the intended signal") and it fired exactly as intended.
 4. **Over-length input.** 201-char `name` and 101-char `slug` must be **400**, not a 500 from a database length error (there is no database length limit, so only the DTO stops them).
 5. **Forged ADMIN token.** A token with `role: ADMIN` signed with the wrong secret must be **401** and must create nothing, with the same payload under the real secret as the control. Mirrors `test/admin-products.e2e-spec.ts:228`.
 

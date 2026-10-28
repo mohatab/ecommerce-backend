@@ -13,7 +13,7 @@ Argon2id · Stripe · Docker · Jest · OpenAPI**
 
 - **9 domain modules**, **26 documented operations** across 23 paths, pinned by a
   test that fails when an endpoint appears or disappears undocumented
-- **447 unit tests** in 33 suites; **374 e2e tests** in 30 suites, against real
+- **447 unit tests** in 33 suites; **377 e2e tests** in 30 suites, against real
   PostgreSQL in Docker — including concurrency suites that fire genuine parallel
   HTTP
 - **Four CI jobs** on every push to `master` and every pull request into it;
@@ -162,7 +162,7 @@ curl -X POST http://localhost:3000/api/v1/admin/products \
 npm run lint:ci      # no autofix — the same command CI runs
 npm run build
 npm test             # 33 suites / 447 tests
-npm run test:e2e     # 30 suites / 374 tests, needs postgres-test on 5433
+npm run test:e2e     # 30 suites / 377 tests, needs postgres-test on 5433
 ```
 
 The e2e suite runs serially against a real database and takes a session-scoped
@@ -269,7 +269,7 @@ unversioned so infrastructure probes have a stable path.
 | `GET /api/v1/products` | public | 200 | Active products only; paginated |
 | `GET /api/v1/products/:id` | public | 200 | Deactivated product → 404 |
 | `GET /api/v1/categories` | public | 200 | |
-| `POST /api/v1/admin/categories` | **Bearer (ADMIN)** | 201 | `{ name, slug }`; `slug` is client-supplied and must match `^[a-z0-9]+(?:-[a-z0-9]+)*$`; duplicate `name` or `slug` → 409. Uniqueness is case-sensitive, and `name` is stored untrimmed |
+| `POST /api/v1/admin/categories` | **Bearer (ADMIN)** | 201 | `{ name, slug }`; `slug` is client-supplied and must match `^[a-z0-9]+(?:-[a-z0-9]+)*$`; duplicate `name` or `slug` → 409. `name` is trimmed before validation, so a name differing only by surrounding whitespace is a 409; uniqueness is case-sensitive |
 | `POST /api/v1/admin/products` | **Bearer (ADMIN)** | 201 | Unknown `categoryId` → 409 |
 | `PATCH /api/v1/admin/products/:id` | **Bearer (ADMIN)** | 200 | Unknown id → 404; unknown `categoryId` → 409; `{ "isActive": true }` restores |
 | `DELETE /api/v1/admin/products/:id` | **Bearer (ADMIN)** | 204 | Soft deactivation, not a delete; unknown id → 404 |

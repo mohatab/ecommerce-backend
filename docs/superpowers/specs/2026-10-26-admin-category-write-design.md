@@ -78,7 +78,7 @@ Request body is `CreateCategoryDto`, shaped to the service's existing
 
 | Field | Rules |
 |---|---|
-| `name` | string, non-blank, max **200** |
+| `name` | string, **trimmed at the DTO boundary**, then non-blank, max **200** |
 | `slug` | string, non-blank, max **100**, matches `^[a-z0-9]+(?:-[a-z0-9]+)*$` |
 
 The slug is **client-supplied, never derived from `name`** — that is the existing
@@ -93,11 +93,26 @@ Two consequences worth stating rather than discovering:
   which uses `@IsString() @MinLength(1) @MaxLength(200)` and so accepts a
   whitespace-only product name. **Aligning products is explicitly out of scope**
   — it is a behaviour change to a shipped route and belongs in its own task.
-- **Uniqueness is case-sensitive**, because `name` and `slug` are plain
+- **`name` is trimmed before validation and before persistence** (approved
+  follow-up, 2026-10-29). A `@Transform` on the field normalises it first, so
+  every rule after it and the row that gets written all see the trimmed value:
+  `@MaxLength(200)` applies to the trimmed length, `'   '` trims to `''` and so
+  still fails `@Matches(/\S/)`, and `' Desks '` collides with an existing
+  `'Desks'` on the UNIQUE index — returning **409** through the same central
+  `P2002` map, rather than becoming a second row that renders identically in the
+  catalog. The transform passes **non-strings through untouched**, so `@IsString`
+  (not a thrown `TypeError`) is what rejects a number or an object; a bare
+  `value.trim()` would surface as a 500.
+- **`slug` is deliberately NOT trimmed.** Its pattern already forbids whitespace
+  anywhere, so a padded slug must be a 400 rather than silently becoming a
+  different valid slug.
+- **Uniqueness remains case-sensitive**, because `name` and `slug` are plain
   PostgreSQL `@unique` columns. `"Desks"` and `"desks"` are two distinct
-  categories and both inserts succeed. This is existing schema behaviour, not
-  introduced here; it is recorded as a known limit rather than worked around,
-  since a case-insensitive constraint is a migration.
+  categories and both inserts succeed. Trimming does not change this: it
+  normalises surrounding whitespace only, and is neither case folding nor a
+  collation change. This is existing schema behaviour, recorded as a known limit
+  rather than worked around, since a case-insensitive constraint is a
+  migration.
 
 The slug regex rejects a leading hyphen, a trailing hyphen, a doubled hyphen,
 uppercase, spaces, and the empty string. This is the first `@Matches` on any DTO
@@ -163,7 +178,11 @@ admin product list. Owner stays unscheduled.
 5. Validation negatives return **400**: missing `name`, missing `slug`,
    whitespace-only `name`, over-length `name` (201 chars), over-length `slug`
    (101 chars), each rejected slug form (leading/trailing/doubled hyphen,
-   uppercase, space), and an unknown extra property.
+   uppercase, space), an unknown extra property, and a non-string `name`.
+5a. **Name normalisation:** a name with surrounding whitespace is stored and
+   returned trimmed; `' Desks '` against an existing `'Desks'` returns **409**;
+   the 200-character maximum is enforced **after** trimming; `'Desks'` and
+   `'desks'` stay distinct.
 6. **Fresh-database path:** on a truncated database, a category created through
    the API is accepted as `categoryId` by `POST /api/v1/admin/products`.
 7. The OpenAPI inventory in `test/swagger.e2e-spec.ts` gains exactly
