@@ -330,7 +330,60 @@ Removing them is a separate change with its own verification, deliberately **not
 bundled into the migration-tooling prune, because the prune's safety argument is
 about engine binaries and would not transfer.
 
-### The admin catalog write surface is unreachable on a fresh database without a direct database insert
+### The admin catalog write surface is unreachable on a fresh database without a direct database insert — PARTLY CLOSED
+
+The heading is **not struck through**, because half of this entry is still
+open.
+
+**Closed by shipping, once an ADMIN exists** (the compiled bootstrap script is
+still required first, and it is not the API): `POST /api/v1/admin/categories`
+now exists
+(`src/modules/categories/admin-categories.controller.ts`), admin-only through a
+single class-level `@Roles(Role.ADMIN)`. A fresh database therefore accepts a
+product through the API alone: create a category, then create a product against
+the returned `id`. That journey is asserted end to end by
+*"lets an ADMIN create a product against a category created through the API"* in
+`test/admin-categories.e2e-spec.ts`, which runs against a truncated database and
+uses nothing but HTTP. Duplicate `name` or `slug` returns 409 through
+`HttpExceptionFilter`'s existing `P2002` map, with no local `try/catch` — a
+control that swallowed the error in the service was recorded returning 500
+instead.
+
+**Still open — the other half of this entry.** A deactivated product's id is
+still unrecoverable through the API. `DELETE /api/v1/admin/products/:id` is a
+soft deactivation reversible with `PATCH { "isActive": true }`, but only by a
+caller who already holds the id: no admin product list ships, the public list
+excludes inactive products, and the public detail route 404s on one. Once an id
+is lost the row is undiscoverable through the API even though it still exists.
+**Owner: unscheduled.** Closing it needs an admin product list, which is its own
+task.
+
+Two things this closure deliberately did **not** change: category deletion is
+still unimplemented, because it needs the orphan policy Phase 2 declined to
+invent, and `Product.category`'s `onDelete: Restrict` is untouched.
+
+And one consequence worth stating, because it needs no orphan policy and so is
+not excused by the argument above: **`CategoriesService.update()` also still has
+no route.** It ships, and is unit- and e2e-tested, but a mistyped `name` or
+`slug` cannot be corrected through the API — it is permanent, publicly visible in
+the catalog, and its unique value is consumed. `name` **is** trimmed, as of an approved follow-up on
+2026-10-29, so `'Desks'` and `'Desks '` no longer produce two rows that render
+identically — the second returns 409 on the UNIQUE index. That holds **for every
+row created from here on, and is not retroactive**: no migration normalises
+existing rows, and with no update route a padded row already in a database stays
+and stays un-correctable. (Moot today, since this route has never been
+deployed.) Two narrower inputs are still accepted and worth knowing: uniqueness
+remains **case-sensitive** (a migration to change, so pinned by a test rather
+than fixed), and a name consisting only of **zero-width** characters survives
+both `trim()` and `/\S/`, so it is a 201 that renders blank in the catalog —
+pre-existing, not introduced by the trim, and fixing it would want the same
+treatment on `CreateProductDto.name`. A category write route for corrections is
+its own task.
+
+**The original entry is preserved verbatim below, per this file's no-deletion
+rule. It describes the state before the category route shipped.**
+
+---
 
 **Owner: unscheduled.**
 

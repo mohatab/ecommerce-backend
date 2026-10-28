@@ -11,11 +11,13 @@ that CI actually runs rather than merely builds.
 **Node.js 20 · TypeScript (strict) · NestJS · PostgreSQL + Prisma · JWT (HS256) +
 Argon2id · Stripe · Docker · Jest · OpenAPI**
 
-- **9 domain modules**, **25 documented operations** across 22 paths, pinned by a
+- **9 domain modules**, **26 documented operations** across 23 paths, pinned by a
   test that fails when an endpoint appears or disappears undocumented
-- **447 unit tests** in 33 suites; **347 e2e tests** in 29 suites, against real
-  PostgreSQL in Docker — including concurrency suites that fire genuine parallel
-  HTTP
+- **Unit tests for every service holding business logic, and an end-to-end
+  suite that runs against real PostgreSQL in Docker** rather than a mock —
+  including concurrency suites that fire genuine parallel HTTP to prove the
+  compare-and-set claims above, each paired with a recorded control that fails
+  against the naive implementation
 - **Four CI jobs** on every push to `master` and every pull request into it;
   one of them runs the **real image**:
   builds it, migrates a throwaway database, serves traffic, waits for Docker's
@@ -134,26 +136,42 @@ no frontend: the Swagger UI and `curl` are the intended way to drive it.
 
 Create the first administrator with the compiled bootstrap script described
 under [Creating the first administrator](#creating-the-first-administrator).
-Note one accepted gap before trying the admin catalog: **Phase 2 ships no
-category write route**, so a product cannot be created until a category exists
-in the database — `POST /api/v1/admin/products` returns 409 on an unknown
-`categoryId`. See [the catalog entry](docs/deferred-limitations.md) for the
-workaround and why it was deferred rather than patched in passing.
+Then, as that admin, create a category before a product — `Product.categoryId`
+is required, so `POST /api/v1/admin/products` returns 409 on an unknown
+`categoryId`:
+
+```bash
+# log in as that admin and keep the access token
+TOKEN=$(curl -s -X POST http://localhost:3000/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"<the bootstrap password>"}' \
+  | node -e 'process.stdin.on("data", (d) => console.log(JSON.parse(d).accessToken))')
+
+# 1. a category, whose id the next call needs
+curl -X POST http://localhost:3000/api/v1/admin/categories \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"Desks","slug":"desks"}'
+
+# 2. a product in it
+curl -X POST http://localhost:3000/api/v1/admin/products \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"Desk Lamp","description":"An adjustable desk lamp.","priceCents":4999,"categoryId":"<id from step 1>"}'
+```
 
 ## Verifying
 
 ```bash
 npm run lint:ci      # no autofix — the same command CI runs
 npm run build
-npm test             # 33 suites / 447 tests
-npm run test:e2e     # 29 suites / 347 tests, needs postgres-test on 5433
+npm test
+npm run test:e2e     # needs postgres-test on 5433
 ```
 
 The e2e suite runs serially against a real database and takes a session-scoped
 advisory lock, so a second concurrent run refuses rather than corrupting the
-first. Counts above are from a local run at the Phase 6 closeout; the badge at
-the top reflects the live conclusion of that workflow on `master`. The four jobs
-are `build`, `e2e`, `docker` and `bootstrap`.
+first. Run the commands for current counts rather than trusting a number
+written here; the badge at the top reflects the live conclusion of that workflow
+on `master`. The four jobs are `build`, `e2e`, `docker` and `bootstrap`.
 
 ## Where to read more
 
@@ -253,6 +271,7 @@ unversioned so infrastructure probes have a stable path.
 | `GET /api/v1/products` | public | 200 | Active products only; paginated |
 | `GET /api/v1/products/:id` | public | 200 | Deactivated product → 404 |
 | `GET /api/v1/categories` | public | 200 | |
+| `POST /api/v1/admin/categories` | **Bearer (ADMIN)** | 201 | `{ name, slug }`; `slug` is client-supplied and must match `^[a-z0-9]+(?:-[a-z0-9]+)*$`; duplicate `name` or `slug` → 409. `name` is trimmed before validation, so a name differing only by surrounding whitespace is a 409; uniqueness is case-sensitive |
 | `POST /api/v1/admin/products` | **Bearer (ADMIN)** | 201 | Unknown `categoryId` → 409 |
 | `PATCH /api/v1/admin/products/:id` | **Bearer (ADMIN)** | 200 | Unknown id → 404; unknown `categoryId` → 409; `{ "isActive": true }` restores |
 | `DELETE /api/v1/admin/products/:id` | **Bearer (ADMIN)** | 204 | Soft deactivation, not a delete; unknown id → 404 |
@@ -288,11 +307,12 @@ order, because the key is scoped to `(userId, idempotencyKey)`. Stock is
 decremented with an atomic, conditional update inside one transaction, so
 concurrent checkouts for the last unit of a product cannot oversell it.
 
-Phase 2 ships no category write route, so a category must exist before
-`POST /api/v1/admin/products` can succeed — until one arrives, insert the
-category directly in the database. A deactivated product (`DELETE`) is
-recoverable only by an operator who already holds its id: there is no admin
-list route to rediscover it once lost.
+A category must exist before `POST /api/v1/admin/products` can succeed, and
+`POST /api/v1/admin/categories` is how an admin creates one — so a fresh
+database is reachable through the API alone. A deactivated product (`DELETE`)
+is still recoverable only by an operator who already holds its id: there is no
+admin list route to rediscover it once lost, and that half of
+[the catalog entry](docs/deferred-limitations.md) stays open.
 
 ### Payments
 
