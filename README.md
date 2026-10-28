@@ -13,9 +13,11 @@ Argon2id · Stripe · Docker · Jest · OpenAPI**
 
 - **9 domain modules**, **26 documented operations** across 23 paths, pinned by a
   test that fails when an endpoint appears or disappears undocumented
-- **447 unit tests** in 33 suites; **377 e2e tests** in 30 suites, against real
-  PostgreSQL in Docker — including concurrency suites that fire genuine parallel
-  HTTP
+- **Unit tests for every service holding business logic, and an end-to-end
+  suite that runs against real PostgreSQL in Docker** rather than a mock —
+  including concurrency suites that fire genuine parallel HTTP to prove the
+  compare-and-set claims above, each paired with a recorded control that fails
+  against the naive implementation
 - **Four CI jobs** on every push to `master` and every pull request into it;
   one of them runs the **real image**:
   builds it, migrates a throwaway database, serves traffic, waits for Docker's
@@ -161,15 +163,15 @@ curl -X POST http://localhost:3000/api/v1/admin/products \
 ```bash
 npm run lint:ci      # no autofix — the same command CI runs
 npm run build
-npm test             # 33 suites / 447 tests
-npm run test:e2e     # 30 suites / 377 tests, needs postgres-test on 5433
+npm test
+npm run test:e2e     # needs postgres-test on 5433
 ```
 
 The e2e suite runs serially against a real database and takes a session-scoped
 advisory lock, so a second concurrent run refuses rather than corrupting the
-first. Counts above are from a local run on this tree; the badge at
-the top reflects the live conclusion of that workflow on `master`. The four jobs
-are `build`, `e2e`, `docker` and `bootstrap`.
+first. Run the commands for current counts rather than trusting a number
+written here; the badge at the top reflects the live conclusion of that workflow
+on `master`. The four jobs are `build`, `e2e`, `docker` and `bootstrap`.
 
 ## Where to read more
 
