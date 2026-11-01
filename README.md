@@ -575,13 +575,24 @@ deliberately, not a hosting solution:
 | --- | --- |
 | URL (only while running **and** port 3000 is set to `public`) | `https://phase7-demo-94r7xrj7rqq37qjx-3000.app.github.dev` |
 | Machine | `basicLinux32gb` — 2 cores, 8 GB RAM, `WestEurope` |
-| Idle behaviour | stops itself after **30 minutes**; restart with `gh codespace start` |
+| Idle behaviour | stops itself after **30 minutes**; reopen it to resume — see below |
 | Included usage | GitHub Free gives **120 core-hours/month** = **60 wall-clock hours** on 2 cores |
 | Retention | a stopped codespace is deleted after **30 days** |
 
 With no process listening, that URL returns **401** from GitHub's forwarding
 layer rather than a 5xx — it is not a stable endpoint and should not be treated
 as one.
+
+**Resuming it.** There is no `gh codespace start` subcommand. A stopped
+codespace resumes when something connects to it:
+
+```bash
+gh codespace ssh  -c <codespace-name>   # terminal; resumes on connect
+gh codespace code -c <codespace-name>   # opens it in VS Code
+```
+
+or open it from github.com/codespaces in a browser. Port 3000 must then be
+forwarded again, and its visibility is **private** unless explicitly published.
 
 Two hosts were observed to require payment before creating any service:
 **Render** (card verification, free tier included) and **Hugging Face Spaces**

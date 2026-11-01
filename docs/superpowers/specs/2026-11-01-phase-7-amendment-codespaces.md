@@ -82,7 +82,7 @@ has been explicitly set to `public`.
 | --- | --- |
 | Platform health check on `/health/live`, 5-second budget | **N/A.** Codespaces has no configurable probe. Evidence is stronger instead: Docker's own `.State.Health.Status` plus the registered `.Config.Healthcheck.Test` string |
 | Service co-located with the database in Frankfurt | **Partially met.** Codespace is `WestEurope`, Neon is `aws-eu-central-1`. Same continent, not the same region. Latency only |
-| Free-tier spin-down behaviour (15 min, ~1 min restore) | **Replaced** by a 30-minute idle stop and a manual `gh codespace start` |
+| Free-tier spin-down behaviour (15 min, ~1 min restore) | **Replaced** by a 30-minute idle stop and a manual reopen (`gh codespace ssh`, `gh codespace code`, or the browser — there is no `start` subcommand) |
 | Always-on public HTTPS demo | **NOT MET.** See §6 |
 | `TRUST_PROXY_HOPS` measured on the deployment | **Met, scoped.** Measured behind GitHub's forwarding proxy. The value is a property of that topology and transfers to no other host |
 

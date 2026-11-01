@@ -767,7 +767,10 @@ Why that falls short of the objective, concretely:
   **and** port 3000 has been explicitly set to `public`. Publishing is not the
   default and does not persist across a stopped listener.
 - It stops itself after **30 minutes** idle (`idle_timeout_minutes: 30`) and must
-  be restarted with `gh codespace start`.
+  be reopened to resume. **There is no `gh codespace start` subcommand**: a
+  codespace resumes when something connects to it — `gh codespace ssh -c <name>`
+  from a terminal, `gh codespace code -c <name>` for VS Code, or opening it from
+  github.com/codespaces in a browser.
 - Running consumes a metered allowance: GitHub Free personal accounts include
   **120 core-hours per month**, which on a 2-core machine is **60 wall-clock
   hours**. Exhausting it blocks Codespaces until the next billing cycle.
