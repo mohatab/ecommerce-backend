@@ -560,6 +560,53 @@ against the real image. `SwaggerModule.setup()` installs Express middleware outs
 the Nest guard chain, so an ungated production container would publish the entire
 API surface — including every admin route — with no authentication in front of it.
 
+### Public demo status — on-demand, not hosted
+
+**There is no always-on public deployment.** The objective of a continuously
+reachable HTTPS demo is **not met** and remains an open deployment requirement;
+see [`docs/deferred-limitations.md`](docs/deferred-limitations.md) and the
+[Phase 7 amendment](docs/superpowers/specs/2026-11-01-phase-7-amendment-codespaces.md).
+
+What exists is a **GitHub Codespace** running this repository's own image against
+a managed Neon Postgres database — a demonstration environment a human starts
+deliberately, not a hosting solution:
+
+| | |
+| --- | --- |
+| URL (only while running **and** port 3000 is set to `public`) | `https://phase7-demo-94r7xrj7rqq37qjx-3000.app.github.dev` |
+| Machine | `basicLinux32gb` — 2 cores, 8 GB RAM, `WestEurope` |
+| Idle behaviour | stops itself after **30 minutes**; restart with `gh codespace start` |
+| Included usage | GitHub Free gives **120 core-hours/month** = **60 wall-clock hours** on 2 cores |
+| Retention | a stopped codespace is deleted after **30 days** |
+
+With no process listening, that URL returns **401** from GitHub's forwarding
+layer rather than a 5xx — it is not a stable endpoint and should not be treated
+as one.
+
+Two hosts were observed to require payment before creating any service:
+**Render** (card verification, free tier included) and **Hugging Face Spaces**
+(Docker Spaces are PRO-only). **Fly.io** has no free tier for new organisations
+per its own documentation. Koyeb, Railway, Google Cloud Run and Oracle Cloud
+were **not verified** — see
+[`docs/deferred-limitations.md`](docs/deferred-limitations.md). The deployment
+path itself is host-agnostic and proven: one `Dockerfile`, one external Postgres
+URL, ten environment variables, migrations as a discrete release command.
+
+**Verified against the live endpoint:** **6 of the 11** planned journey steps
+fully, four partially (the journey script asserts HTTP status codes only, never
+response bodies) and one (`GET /api/v1/categories`) not run; `/api/docs`
+returning 404 under production; `/api/health/live` returning 404 (the prefix
+exclusion); three boot-abort guards; container restart with state intact; a
+rollback drill; and five webhook delivery scenarios carrying ten assertions
+against a real Stripe signing secret.
+
+**Not verified:** two planned negative controls (a malformed `Idempotency-Key`
+→ 400, and another customer's order → 404) were **not run**; two supplemental
+probes were executed instead and **do not substitute** for them. The webhook
+events were **constructed and signed locally** — no delivery originating from
+Stripe has been observed reaching the endpoint. Full accounting in the
+[plan's execution record](docs/superpowers/plans/2026-10-29-phase-7-public-demo-deployment.md).
+
 ## Project Structure
 
 ```

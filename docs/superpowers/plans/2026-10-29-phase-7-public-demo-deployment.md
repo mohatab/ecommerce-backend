@@ -260,6 +260,14 @@ Set `PAYMENT_PROVIDER=fake` in Render, redeploy, observe failure, revert.
 negative controls (403 for a customer on an admin route, 401 anonymous, 400 on a
 malformed idempotency key, 404 for another customer's order) all PASS.
 
+> **Execution note (2026-11-01).** The four controls above are preserved as
+> planned. Two of them — the malformed `Idempotency-Key` 400 and the
+> other-customer 404 — were **NOT RUN**. Two different probes were executed
+> instead (unsigned webhook 400, unknown product 404). Those are
+> **supplemental and do not satisfy the two missing checks**: neither
+> exercises idempotency-key validation, and neither exercises ownership
+> scoping, which is the property the other-customer 404 exists to prove.
+
 ---
 
 ## Task 6 — Measure `TRUST_PROXY_HOPS`
@@ -413,3 +421,108 @@ has a recorded verdict, not when every item is green.
 
 **Never requested in chat, in any task:** passwords, API tokens,
 `DATABASE_URL`, `JWT_SECRET`, or any Stripe secret.
+
+---
+
+# Execution record — 2026-11-01
+
+Host substituted mid-execution; see
+[the Phase 7 amendment](../specs/2026-11-01-phase-7-amendment-codespaces.md).
+**PASS** means the check ran and matched. **NOT VERIFIED** means it did not run
+or could not run, with the reason named — never silently upgraded.
+
+**Date note.** 2026-11-01 is the date this record was prepared. The Task 0
+results below were **carried forward from an earlier session against the same
+commit (`a84aca7`) and were NOT rerun on 2026-11-01.** They are reproduced
+unchanged; no fresh run is implied. Every other row was executed on 2026-11-01.
+
+| Task | Check | Result | Evidence |
+| --- | --- | --- | --- |
+| 0 | `npm run lint:ci`, `npm run build` | **PASS** *(carried forward, not rerun)* | exit 0, earlier session, same commit |
+| 0 | `npm test` | **PASS** *(carried forward, not rerun)* | 33 suites, 447 tests, earlier session, same commit |
+| 0 | `npm run test:e2e` | **PASS** *(carried forward, not rerun)* | 30 suites, 377 tests, incl. the 26-operation inventory, earlier session, same commit |
+| 1 | Neon project in `aws-eu-central-1` | **PASS** | `ecommerce-backend` / `crimson-dew-74341531`, branch `main` |
+| 1 | Render account + service | **NOT VERIFIED** | blocked: card verification required for the free tier; card declined |
+| 1 | `JWT_SECRET` generated, Stripe sandbox key obtained | **PASS** | 64-char secret; `sk_test_` prefix confirmed |
+| 2a | `prisma migrate deploy` via the migrate image | **PASS** | 5 migrations applied, exit 0, direct (non-pooled) host enforced |
+| 2a | Schema verified independently of the migrator | **PASS** | 13 tables; `maintenance_leases` = 3 rows; `users` = 0 (no dev-data import) |
+| 2b | Admin bootstrap | **PASS** | run 1 `created`, run 2 `unchanged` |
+| 2b | Bootstrap idempotency (hash not rewritten) | **PASS** | `password_hash` fingerprint identical across runs |
+| 3 | Deploy the serving image to a public host | **PASS (substituted)** | Codespace `phase7-demo-94r7xrj7rqq37qjx`, image `sha256:bbcb35cb…`, commit `a84aca7` |
+| 3 | Platform health check on `/health/live` | **N/A** | Codespaces has no configurable probe; Docker `.State.Health.Status` = `healthy` used instead |
+| 4 | Webhook destination registered with a real signing secret | **PASS** | `ecommerce-backend-phase7-demo`, snapshot payload, `payment_intent.succeeded` |
+| 4 | Missing signature rejected, order stays `PENDING` | **PASS** | 400 / `PENDING` |
+| 4 | Tampered signature rejected, order stays `PENDING` | **PASS** | 400 / `PENDING` |
+| 4 | Amount mismatch returns 200, not 4xx; order unpaid | **PASS** | 200 / `PENDING` |
+| 4 | Valid signature marks the order `PAID` | **PASS** | 200 / `PAID` |
+| 4 | Replay deduped, not double-paid | **PASS** | 200 / `PAID` |
+| 4 | **Genuine delivery from Stripe's infrastructure** | **NOT VERIFIED** | all events were constructed and signed locally; no Stripe-originated request observed |
+| 4 | Stripe API version parity | **NOT VERIFIED** | destination delivers `2026-10-28.endive`; SDK pins `2026-08-26.dahlia`; sandbox offers no earlier version |
+| 5a | §8.3 steps 1, 2, 4, 6, 7, 9 | **PASS** | **6 of 11 fully verified.** Step 4's omitted `currency` defaulting to `USD` is evidenced by the restart probe; step 9's `PENDING` by the webhook run's read-back |
+| 5a | §8.3 step 5 — `GET /products` **and** `GET /products/{id}` | **PARTIAL** | list returned 200 in the routing probes; **detail on a valid id never ran** |
+| 5a | §8.3 step 8 — `GET /cart` → 200 **and `totalCents`** | **PARTIAL** | 200 asserted; **`totalCents` never read.** `CartResponseDto` computes it in `from()` (`cart-response.dto.ts:45`); the webhook run evidences the **order** total, a different field from a different path |
+| 5a | §8.3 step 10 — replay → 200 **and the same order id** | **PARTIAL** | 200 (not 201) asserted; **the two order ids were never compared**, so "same order, not a second one" is unproven by this run |
+| 5a | §8.3 step 11 — `GET /orders` **and** `GET /orders/{id}` | **PARTIAL** | detail ran inside the webhook controls; **the list route never ran** |
+| 5a | §8.3 step 3 — `GET /api/v1/categories` | **NOT VERIFIED** | never executed |
+| 5.9–5.12 | **Planned** control: step 2 with the customer's token → 403 | **PASS** | 403 |
+| 5.9–5.12 | **Planned** control: step 2 with no token → 401 | **PASS** | 401 |
+| 5.9–5.12 | **Planned** control: step 9 with a malformed `Idempotency-Key` → 400 | **NOT RUN** | never executed |
+| 5.9–5.12 | **Planned** control: `GET /orders/{id}` as a different customer → 404 | **NOT RUN** | never executed |
+| — | *Supplemental* probe (not in the plan): unsigned webhook → 400 | **PASS** | 400 |
+| — | *Supplemental* probe (not in the plan): unknown product id → 404 | **PASS** | 404 |
+| 5b | `/health/live` 200, `/health` 200, `/api/v1/products` 200 | **PASS** | against the public URL |
+| 5b | `/api/docs` → 404 under production | **PASS** | spec §1 criterion |
+| 5b | `/api/health/live` → 404 (prefix exclusion) | **PASS** | the regression test CLAUDE.md names |
+| 5c | Cold-start measurement | **NOT VERIFIED** | no free-tier spin-down equivalent; a codespace resume is a different mechanism and was not timed |
+| 5d | Boot abort: `PAYMENT_PROVIDER=fake` under production | **PASS** | exit 1, `"PAYMENT_PROVIDER" must be [stripe]` |
+| 5d | Boot abort: `TRUST_PROXY_HOPS` absent | **PASS** | exit 1, `"TRUST_PROXY_HOPS" is required` |
+| 5d | Boot abort: `CORS_ORIGIN=*` under production | **PASS** | exit 1, `"CORS_ORIGIN" contains an invalid value` |
+| 5 | Restart survival | **PASS** | `healthy` in ~2 s, identical product row served |
+| 6 | Probe A — spoofed `X-Forwarded-For` still throttled | **PASS** | `401 401 401 401 401 429 429` |
+| 6 | Probe B — second genuine source not throttled | **PASS** | `401 401` while source A was 429 |
+| 6 | `TRUST_PROXY_HOPS=1` correct for this host | **PASS (scoped)** | GitHub's forwarding proxy only; not portable |
+| 7 | Rollback exercised once | **PASS** | see below |
+| 7 | Documentation updated | **PASS** | amendment, `deferred-limitations.md`, README, this record |
+| 7 | Commit, push, PR | **NOT DONE** | withheld by operator instruction pending review of this diff |
+| — | **Always-on public HTTPS demo** | **NOT MET** | the phase's original objective; carried forward as an open requirement |
+
+**Shape of the webhook evidence.** The six Task 4 rows above come from
+**five delivery scenarios** (missing signature, tampered signature, amount
+mismatch, valid event, replayed event) carrying **ten assertions**: five on
+the HTTP response status, and five read-backs of the order's database state
+after each delivery. They are not ten independent probes. Every event was
+**constructed and signed locally** with the real signing secret; no delivery
+originating from Stripe was observed.
+
+**Counting rule.** Only PASS counts as fully verified. The journey script
+(`call()`) asserts **HTTP status codes only** — no response body is examined —
+which is why four steps carrying a value assertion land at PARTIAL.
+
+## Rollback report
+
+Container-level only. **No database operation was performed in either
+direction**, and Neon data was neither migrated, reset nor edited.
+
+| | Before | Bad deploy | After rollback |
+| --- | --- | --- | --- |
+| Container | `/demo`, `healthy` | `exited`, `exit=1` | `/demo`, `healthy` |
+| Image id | `sha256:bbcb35cb…` | same image, bad config | `sha256:bbcb35cb…` (identical) |
+| Boot log | serving | `Config validation error: "PAYMENT_PROVIDER" must be [stripe]` | serving |
+| `/health/live` (public) | 200 | **401** — GitHub's edge, nothing listening | 200 |
+| `/api/v1/products` | 200 | — | 200 |
+| DB counts | users=4 products=3 orders=3 paid=1 payments=3 events=2 | *(not read)* | **identical** |
+
+**Method.** The regression injected was a configuration fault
+(`PAYMENT_PROVIDER=fake` under `NODE_ENV=production`), chosen because it fails at
+boot rather than corrupting anything. Rollback was redeploying the **same image**
+with the known-good environment file. Recovery to `healthy` took ~8 s.
+
+**How rollback was verified**, rather than assumed: the image id matched
+byte-for-byte before and after; the container reported Docker-level `healthy`;
+the public URL returned 200 on both liveness and catalogue; and the read-only row
+counts — including the single `PAID` order created by the webhook controls — were
+unchanged, proving the drill neither lost nor altered committed state.
+
+**Rollback limitation.** This exercises *application* rollback only. The
+migrations are forward-only and were **not** reversed; a schema rollback has
+never been exercised and is not a capability this project claims.

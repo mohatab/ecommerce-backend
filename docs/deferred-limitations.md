@@ -750,3 +750,106 @@ only on **container restart** — not between `npm run test:e2e` invocations. A 
 using fixed email addresses must call `truncateAll()` (see `test/auth.e2e-spec.ts`)
 or generate unique addresses per run (see `test/auth-guard.e2e-spec.ts`). Either
 works; a suite that does neither passes once and then 409s forever.
+
+## Deployment
+
+### There is no always-on public deployment; the demo is on-demand
+
+**Owner: open deployment requirement, carried forward from Phase 7.**
+
+Phase 7 set out to deliver a continuously reachable public HTTPS demo. It did
+not. What exists is a **GitHub Codespace** (`basicLinux32gb`, 2 cores, 8 GB RAM,
+`WestEurope`) running the repository's own image against the Neon database.
+
+Why that falls short of the objective, concretely:
+
+- It serves only while the codespace is **running**, the container is listening,
+  **and** port 3000 has been explicitly set to `public`. Publishing is not the
+  default and does not persist across a stopped listener.
+- It stops itself after **30 minutes** idle (`idle_timeout_minutes: 30`) and must
+  be restarted with `gh codespace start`.
+- Running consumes a metered allowance: GitHub Free personal accounts include
+  **120 core-hours per month**, which on a 2-core machine is **60 wall-clock
+  hours**. Exhausting it blocks Codespaces until the next billing cycle.
+- A stopped codespace is deleted after **30 days** (`retention_period_minutes:
+  43200`), taking the environment — though not the database — with it.
+
+**Do not describe this as hosting.** It is a reproducible demonstration
+environment that a human starts deliberately.
+
+Hosts checked during Phase 7, at the strength the evidence supports:
+
+- **Render — card required, directly observed.** Its Add Card modal blocked
+  creation of a Free-tier service ($1 USD temporary authorization).
+- **Hugging Face Spaces — paid plan required, directly observed.** The Space
+  creation form states Docker Spaces require PRO; free Spaces are static only.
+- **Fly.io — no free tier for new organisations**, verified from official
+  documentation during the Phase 7 research session.
+- **Koyeb — UNVERIFIED.** Its billing documentation returned HTTP 404 on every
+  attempt; 2026 third-party sources conflict over whether a card is required.
+- **Railway, Google Cloud Run, Oracle Cloud — NOT VERIFIED.** Named in
+  third-party roundups only; no official page was read.
+
+**This entry does not claim that every provider requires payment.** Two were
+observed to; one is documented to have no free tier; the rest are unchecked.
+Closing this entry starts by verifying *entitlement* — not merely Docker
+capability — for the unchecked hosts, which is the exact mistake that cost this
+phase two configured deployments. The deployment path itself is proven and
+host-agnostic: one `Dockerfile`, one external Postgres URL, ten environment
+variables.
+
+### The webhook endpoint is verified at the application level, not end-to-end from Stripe
+
+**Owner: unscheduled.**
+
+A real Stripe sandbox destination exists (`ecommerce-backend-phase7-demo`,
+snapshot payload style, subscribed to `payment_intent.succeeded`) and its **real
+signing secret** was configured on the running deployment. Against that secret,
+**five delivery scenarios** passed, carrying **ten assertions** — five on the
+HTTP response status and five read-backs of the order's database state, not ten
+independent probes. A tampered signature and a missing signature are both
+rejected with 400 and leave the order `PENDING`; a correctly signed event moves
+it to `PAID`; an amount mismatch returns **200**, not 4xx, leaving the order
+unpaid; and a replayed event returns 200 without double-paying.
+
+What those controls do **not** establish: the events were **constructed and
+signed locally**, not delivered by Stripe. **No request originating from
+Stripe's infrastructure has been observed reaching this endpoint.** Stripe's
+delivery path, its retry schedule, and its TLS negotiation against the host
+remain unverified. The same gap is recorded from the other side in *"Provider
+HTTP behaviour is never exercised in CI"*.
+
+Closing this needs one delivery triggered from the Stripe dashboard or CLI
+against a running deployment, with the resulting 200 read from Stripe's own
+delivery log rather than from ours.
+
+### The webhook destination's Stripe API version does not match the pinned SDK version
+
+**Owner: unscheduled.**
+
+`stripe-payment.provider.ts` pins `apiVersion: '2026-08-26.dahlia'` for outbound
+calls — compiler-enforced, so an SDK upgrade that moves the version is a build
+error rather than a silent wire change. The webhook destination, however,
+delivers **`2026-10-28.endive`**, and the sandbox's version selector offers no
+earlier version to choose.
+
+Verified scope of the mismatch: `verifyWebhook()` reads exactly
+`event.data.object.id`, `.amount`, `.currency` and `.metadata.orderId`, and all
+four were present and correctly typed in `endive` payloads. Every other field is
+unverified across the gap. A future phase that reads a fifth field must re-check
+it against the delivered version, because the pin does **not** govern what
+arrives.
+
+### The measured `TRUST_PROXY_HOPS` value is a property of one host's topology
+
+**Owner: open, alongside the hosting entry above.**
+
+`TRUST_PROXY_HOPS=1` was measured on the Codespaces deployment with two probes
+that fail in opposite directions — spoofed `X-Forwarded-For` entries still hit
+the 5/min login limit (not too high), while a second genuine client source
+stayed unthrottled at the same moment (not too low). Both pass at `1`.
+
+That result describes **GitHub's forwarding proxy and nothing else.** Moving to
+any other host invalidates it and the measurement must be repeated there. It
+does not make `1` a default, a fallback, or a README recommendation — see
+*"`TRUST_PROXY_HOPS` is verifiable only through throttling behaviour"*.

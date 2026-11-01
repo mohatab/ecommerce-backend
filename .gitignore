@@ -24,6 +24,11 @@ npm-debug.log*
 .claude/
 .superpowers/
 
+# generated local tooling state
+# .neon holds this checkout's Neon CLI linkage (project, org and branch ids).
+# Machine-local and regenerable with `neon link`.
+.neon
+
 # OS
 .DS_Store
 Thumbs.db
