@@ -6,8 +6,11 @@ dist/
 build/
 
 # environment
+# Broad by design: any .env variant is secret-bearing until proven otherwise.
+# .env.example is the one tracked template and is negated below.
 .env
-.env.*.local
+.env.*
+!.env.example
 
 # testing / coverage
 coverage/
@@ -23,6 +26,11 @@ npm-debug.log*
 # local agent tooling preferences
 .claude/
 .superpowers/
+
+# generated local tooling state
+# .neon holds this checkout's Neon CLI linkage (project, org and branch ids).
+# Machine-local and regenerable with `neon link`.
+.neon
 
 # OS
 .DS_Store
