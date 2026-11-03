@@ -292,8 +292,8 @@ describe('Maintenance concurrency (e2e)', () => {
 
     // The event is authentic in every interleaving, so it is always 200 —
     // including the one where the sweep won and `markPaid()` reports
-    // 'expired'. A 4xx there would tell the provider to stop retrying an
-    // event it was right to send.
+    // 'expired'. A non-2xx there would count as a failed delivery, and the
+    // provider would keep retrying an event it was right to send.
     expect(delivered.status).toBe(200);
     expect(summary.failed).toBe(0);
 
