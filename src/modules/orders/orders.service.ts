@@ -195,10 +195,11 @@ export class OrdersService {
    * status check and an update.
    *
    * It NEVER throws. Its caller is a webhook handler, and a thrown
-   * NotFoundException would reach the payment provider as a 404 — which most
-   * providers read as "this event is permanently rejected, stop retrying".
-   * The outcome is returned instead and the caller chooses the response,
-   * which for the webhook is always 200.
+   * NotFoundException would reach the payment provider as a 404. Stripe
+   * treats every non-2xx response as a failed delivery and retries it, so an
+   * authentic event would keep failing even though no retry can change the
+   * outcome. The outcome is returned instead and the caller chooses the
+   * response, which for the webhook is always 200.
    */
   async markPaid(
     tx: Prisma.TransactionClient,

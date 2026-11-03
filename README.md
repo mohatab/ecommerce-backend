@@ -112,8 +112,12 @@ Checkout is idempotent on a caller-supplied key via a
 `@@unique([userId, idempotencyKey])` constraint
 ([`schema.prisma:137`](prisma/schema.prisma)), and webhook deliveries dedupe
 inside one statement with `createMany({ skipDuplicates: true })` rather than a
-caught `P2002` — a 4xx would tell the provider to stop retrying and permanently
-lose a transient duplicate.
+caught `P2002`, so an already-processed event is acknowledged with a 200. A
+`P2002` would surface as a 409, and Stripe treats every non-2xx response as a
+failed delivery and retries it (for up to three days in live mode), so the
+duplicate would fail on every retry instead of being acknowledged. Duplicate
+protection comes from the unique event ID in the database, not from the status
+code.
 
 Routes live under `/api/v1/*` (global prefix plus URI versioning); `/health` and
 `/health/live` are excluded from both so infrastructure probes have a stable

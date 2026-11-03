@@ -61,9 +61,10 @@ export class PaymentWebhookService {
         });
 
         if (order === null) {
-          // Recorded and acknowledged. A 4xx would make the provider stop
-          // retrying an event we may need; a retry would not help either,
-          // because the order genuinely does not exist here.
+          // Recorded and acknowledged with a 200. Stripe treats any non-2xx
+          // response as a failed delivery and may keep retrying it, but no
+          // retry can resolve this one: the order genuinely does not exist
+          // here.
           this.logger.error(
             `Webhook ${event.providerEventId} references unknown order ${event.orderId}`,
           );
